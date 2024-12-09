@@ -1,0 +1,17 @@
+name: talk_explainer
+description: A new Flutter project for speech transcription and explanation.
+
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  http: ^1.1.0
+  speech_to_text: ^6.1.1
+  permission_handler: ^10.2.0
+
+flutter:
+  uses-material-design: true
