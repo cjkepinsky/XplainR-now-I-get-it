@@ -4,6 +4,8 @@
 <dict>
 	<key>BuildMachineOSBuild</key>
 	<string>24B91</string>
+	<key>CFBundleExecutable</key>
+	<string>talkexplainer</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconName</key>

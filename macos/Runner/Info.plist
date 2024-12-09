@@ -19,5 +19,8 @@
     <string>Potrzebujemy dostępu do mikrofonu aby transkrybować mowę</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Potrzebujemy dostępu do rozpoznawania mowy aby tworzyć transkrypcję</string>
+    <!-- Dodaj poniższy klucz -->
+    <key>CFBundleExecutable</key>
+    <string>talkexplainer</string>
 </dict>
 </plist>
