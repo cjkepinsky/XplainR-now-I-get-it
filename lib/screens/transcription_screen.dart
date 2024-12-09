@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../widgets/transcription_view.dart';
 import '../widgets/explanation_popup.dart';
 import '../services/openai_service.dart';
@@ -23,7 +24,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   @override
   void initState() {
     super.initState();
-    _initSpeech();
+    print('Requesting permissions...');
+
+    _requestPermissions().then((_) {
+      print('Initializing speech...');
+      _initSpeech();
+    });
   }
 
    void _initSpeech() async {
@@ -38,21 +44,47 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
      });
    }
 
-   void _startListening() async {
-     await _speechToText.listen(onResult: _onSpeechResult);
-     setState(() {});
-   }
-
-   void _onSpeechResult(SpeechRecognitionResult result) {
-     setState(() {
-       _transcription = result.recognizedWords;
-     });
-   }
-
-  void _stopListening() async {
-    await _speechToText.stop();
-    setState(() {});
+Future<void> _requestPermissions() async {
+  var status = await Permission.microphone.status;
+  if (!status.isGranted) {
+    status = await Permission.microphone.request();
+    if (!status.isGranted) {
+      // Obsłuż brak uprawnień, np. pokaż komunikat
+      print('Brak uprawnień do mikrofonu');
+    }
   }
+
+  var speechStatus = await Permission.speech.status;
+  if (!speechStatus.isGranted) {
+    speechStatus = await Permission.speech.request();
+    if (!speechStatus.isGranted) {
+      // Obsłuż brak uprawnień, np. pokaż komunikat
+      print('Brak uprawnień do rozpoznawania mowy');
+    }
+  }
+}
+
+void _onSpeechResult(SpeechRecognitionResult result) {
+  setState(() {
+    _transcription = result.recognizedWords;
+  });
+  print('Recognized words: ${result.recognizedWords}');
+}
+
+void _startListening() async {
+  print('Start listening');
+  await _speechToText.listen(
+    onResult: _onSpeechResult,
+    listenMode: ListenMode.dictation,
+  );
+  setState(() {});
+}
+
+void _stopListening() async {
+  print('Stop listening');
+  await _speechToText.stop();
+  setState(() {});
+}
 
   void _handleWordTap(String word) async {
     if (_selectedWord == word) {
