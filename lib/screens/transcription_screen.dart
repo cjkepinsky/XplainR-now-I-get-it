@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
 import '../widgets/transcription_view.dart';
 import '../widgets/explanation_popup.dart';
 import '../services/openai_service.dart';
@@ -16,7 +17,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String _transcription = '';
   String? _selectedWord;
   String? _wordExplanation;
-  final SpeechToText _speechToText = SpeechToText();
+  SpeechToText _speechToText = SpeechToText();
   bool _speechEnabled = false;
 
   @override
@@ -25,21 +26,28 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _initSpeech();
   }
 
-  Future<void> _initSpeech() async {
-    _speechEnabled = await _speechToText.initialize();
-    setState(() {});
-  }
+   void _initSpeech() async {
+     _speechToText = SpeechToText();
+     bool available = await _speechToText.initialize(
+       onStatus: (status) => print('onStatus: $status'),
+       onError: (errorNotification) => print('onError: $errorNotification'),
+     );
+     print('Speech recognition available: $available');
+     setState(() {
+       _speechEnabled = available;
+     });
+   }
 
-  void _startListening() async {
-    await _speechToText.listen(
-      onResult: (result) {
-        setState(() {
-          _transcription = result.recognizedWords;
-        });
-      },
-    );
-    setState(() {});
-  }
+   void _startListening() async {
+     await _speechToText.listen(onResult: _onSpeechResult);
+     setState(() {});
+   }
+
+   void _onSpeechResult(SpeechRecognitionResult result) {
+     setState(() {
+       _transcription = result.recognizedWords;
+     });
+   }
 
   void _stopListening() async {
     await _speechToText.stop();
@@ -99,12 +107,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
             ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _speechEnabled
-            ? (_speechToText.isNotListening ? _startListening : _stopListening)
-            : null,
-        child: Icon(_speechToText.isNotListening ? Icons.mic_off : Icons.mic),
-      ),
+   floatingActionButton: FloatingActionButton(
+     onPressed: (_speechEnabled && !_speechToText.isListening)
+         ? _startListening
+         : _stopListening,
+     child: Icon(_speechToText.isNotListening ? Icons.mic_off : Icons.mic),
+   ),
     );
   }
 }
