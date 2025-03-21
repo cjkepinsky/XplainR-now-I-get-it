@@ -46,8 +46,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
 Future<void> _requestPermissions() async {
   var status = await Permission.microphone.status;
+       print('Microphone permission status: $status');
+
   if (!status.isGranted) {
     status = await Permission.microphone.request();
+    print('Microphone permission requested: $status');
+
     if (!status.isGranted) {
       // Obsłuż brak uprawnień, np. pokaż komunikat
       print('Brak uprawnień do mikrofonu');
@@ -55,8 +59,11 @@ Future<void> _requestPermissions() async {
   }
 
   var speechStatus = await Permission.speech.status;
+  print('Speech permission status: $speechStatus');
   if (!speechStatus.isGranted) {
     speechStatus = await Permission.speech.request();
+    print('Speech permission requested: $speechStatus');
+
     if (!speechStatus.isGranted) {
       // Obsłuż brak uprawnień, np. pokaż komunikat
       print('Brak uprawnień do rozpoznawania mowy');
