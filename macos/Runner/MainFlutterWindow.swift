@@ -2,6 +2,8 @@ import Cocoa
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
+  private let systemAudioPlugin = SystemAudioTranscriptionPlugin()
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
@@ -9,6 +11,7 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    systemAudioPlugin.register(binaryMessenger: flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
   }

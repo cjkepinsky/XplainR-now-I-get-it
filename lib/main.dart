@@ -1,25 +1,32 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
 import 'screens/transcription_screen.dart';  
 
 void main() {
-  runApp(const TalkExplainerApp());
+  runApp(const XplainRApp());
   // Włączamy dostępność dla czytników ekranu
   SemanticsBinding.instance.ensureSemantics();
 }
 
-class TalkExplainerApp extends StatelessWidget {
-  const TalkExplainerApp({super.key});
+class XplainRApp extends StatelessWidget {
+  const XplainRApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'TalkExplainer',
+      title: 'XplainR',
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
       ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: ThemeMode.system,
       home: const TranscriptionScreen(),
     );
   }

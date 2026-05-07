@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.example.talkexplainer</string>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleName</key>
-    <string>TalkExplainer</string>
+    <string>XplainR</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -13,14 +13,18 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.14</string>
+    <string>13.0</string>
     <!-- Istniejące wpisy pozostaw bez zmian -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Potrzebujemy dostępu do mikrofonu aby transkrybować mowę</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Potrzebujemy dostępu do rozpoznawania mowy aby tworzyć transkrypcję</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Potrzebujemy dostępu do przechwytywania ekranu aby odczytywać audio systemowe ze spotkań i odtwarzaczy.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Potrzebujemy dostępu do audio systemowego aby transkrybować dźwięk z innych aplikacji.</string>
     <!-- Dodaj poniższy klucz -->
     <key>CFBundleExecutable</key>
-    <string>talkexplainer</string>
+    <string>$(EXECUTABLE_NAME)</string>
 </dict>
 </plist>

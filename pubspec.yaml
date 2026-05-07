@@ -1,5 +1,5 @@
-name: talk_explainer
-description: A new Flutter project for speech transcription and explanation.
+name: xplainr
+description: Desktop assistant for live transcription and technical explanations.
 
 environment:
   sdk: '>=3.5.0 <4.0.0'
@@ -10,11 +10,7 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.2
   http: ^1.1.0
-  speech_to_text: ^6.6.2
-  permission_handler: ^10.4.5
+  speech_to_text: ^7.3.0
 
 flutter:
   uses-material-design: true
-
-dependency_overrides:
-  permission_handler_apple: ^9.4.5
