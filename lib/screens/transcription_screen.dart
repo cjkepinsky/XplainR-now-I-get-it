@@ -9,6 +9,8 @@ import '../widgets/transcription_view.dart';
 import '../widgets/explanation_history_view.dart';
 import '../services/openai_service.dart';
 import '../services/local_session_service.dart';
+import '../l10n/app_strings.dart';
+import '../models/explanation_citation.dart';
 
 class TranscriptionScreen extends StatefulWidget {
   const TranscriptionScreen({super.key});
@@ -20,10 +22,12 @@ class TranscriptionScreen extends StatefulWidget {
 class _SignalLevelIndicator extends StatelessWidget {
   final String label;
   final double level;
+  final AppStrings strings;
 
   const _SignalLevelIndicator({
     required this.label,
     required this.level,
+    required this.strings,
   });
 
   @override
@@ -32,7 +36,10 @@ class _SignalLevelIndicator extends StatelessWidget {
     final color = _signalColor(context, roundedLevel);
 
     return Tooltip(
-      message: '$label: siła sygnału audio',
+      message: strings.pick(
+        '$label: siła sygnału audio',
+        '$label: audio signal level',
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -40,7 +47,8 @@ class _SignalLevelIndicator extends StatelessWidget {
           const SizedBox(width: 6),
           Text(
             label,
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(color: color),
+            style:
+                Theme.of(context).textTheme.labelMedium?.copyWith(color: color),
           ),
           const SizedBox(width: 6),
           SizedBox(
@@ -129,14 +137,17 @@ class _SessionAction {
 class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final List<String> _transcriptionSegments = [];
   final List<ExplanationItem> _explanations = [];
+  final Set<int> _collapsedExplanationIds = {};
   final List<LocalSessionSummary> _sessionSummaries = [];
   final List<LocalAutoCorrectionRule> _autoCorrectionRules = [];
   final List<String> _projects = [LocalSessionService.defaultProject];
   final List<_PartialCorrection> _microphonePartialCorrections = [];
   final List<_PartialCorrection> _systemAudioPartialCorrections = [];
-  final TextEditingController _transcriptionController = TextEditingController();
+  final TextEditingController _transcriptionController =
+      TextEditingController();
   final TextEditingController _questionController = TextEditingController();
-  final TextEditingController _sessionContextController = TextEditingController();
+  final TextEditingController _sessionContextController =
+      TextEditingController();
   final TextEditingController _explanationLengthController =
       TextEditingController(text: '300');
   String _partialMicrophoneTranscription = '';
@@ -146,8 +157,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _speechEnabled = false;
   bool _isSystemAudioListening = false;
   bool _isAskingQuestion = false;
+  bool _forceWebResearch = false;
   String _selectedLocaleId = 'en_US';
   String _selectedAnswerLanguage = 'pl';
+  String _selectedInterfaceLanguage = 'pl';
   String _selectedSource = 'microphone';
   String _selectedProject = LocalSessionService.defaultProject;
   String _currentSessionProject = LocalSessionService.defaultProject;
@@ -177,12 +190,21 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   RegExp? _autoCorrectionMatcher;
   Map<String, String> _autoCorrectionReplacements = {};
 
-  static const _systemAudioControl = MethodChannel('xplainr/system_audio_control');
+  static const _systemAudioControl =
+      MethodChannel('xplainr/system_audio_control');
   static const _systemAudioEvents = EventChannel('xplainr/system_audio_events');
   static const _visibleTranscriptWordLimit = 1500;
 
   String get _committedTranscription => _transcriptionController.text;
   String get _sessionContext => _sessionContextController.text.trim();
+  AppStrings get _t => AppStrings.forLanguage(_selectedInterfaceLanguage);
+
+  String _displayProjectName(String project) {
+    if (project == LocalSessionService.defaultProject) {
+      return _t.pick('Bez projektu', 'No project');
+    }
+    return project;
+  }
 
   String get _transcription {
     return [
@@ -192,13 +214,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     ].where((part) => part.trim().isNotEmpty).join('\n\n');
   }
 
-  ({List<TranscriptDisplaySegment> segments, bool isTruncated}) get _visibleTranscript {
+  ({List<TranscriptDisplaySegment> segments, bool isTruncated})
+      get _visibleTranscript {
     final fullText = _transcription;
     if (fullText.trim().isEmpty) {
       return (segments: const <TranscriptDisplaySegment>[], isTruncated: false);
     }
 
-    final tailStart = _tailStartForLastWords(fullText, _visibleTranscriptWordLimit);
+    final tailStart =
+        _tailStartForLastWords(fullText, _visibleTranscriptWordLimit);
     if (tailStart == 0) {
       return (
         segments: _displaySegmentsFromText(fullText, 0),
@@ -244,7 +268,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     String text,
     int baseOffset,
   ) {
-    final matches = RegExp(r'[^\s](?:[\s\S]*?[^\s])?(?=\n{2,}|$)').allMatches(text);
+    final matches =
+        RegExp(r'[^\s](?:[\s\S]*?[^\s])?(?=\n{2,}|$)').allMatches(text);
     return matches
         .map(
           (match) => TranscriptDisplaySegment(
@@ -259,7 +284,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   @override
   void initState() {
     super.initState();
-    print('Initializing speech...');
+    debugPrint('Initializing speech...');
     _transcriptionController.addListener(_scheduleTranscriptSnapshotSave);
     _sessionContextController.addListener(_scheduleSessionContextSave);
     _loadSavedPreferences();
@@ -276,7 +301,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _transcriptionSaveDebounce?.cancel();
     _transcriptionSaveDebounce = Timer(
       const Duration(milliseconds: 700),
-      () => _sessionService.writeTranscriptSnapshot(_transcriptionController.text),
+      () => _sessionService
+          .writeTranscriptSnapshot(_transcriptionController.text),
     );
   }
 
@@ -301,7 +327,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
   Future<void> _refreshSessionLibrary() async {
     final summaries = await _sessionService.loadSessionSummaries();
-    final projects = await _sessionService.loadProjects(sessionSummaries: summaries);
+    final projects =
+        await _sessionService.loadProjects(sessionSummaries: summaries);
     if (!mounted) return;
 
     final previousProject = _selectedProject;
@@ -363,10 +390,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
               term: record.term,
               explanation: record.explanation,
               error: record.error,
+              citations: record.citations,
             ),
           ),
         );
-      _statusMessage = 'Załadowano sesję: ${snapshot.directory.path}';
+      _collapsedExplanationIds.clear();
+      _statusMessage = _t.pick(
+        'Załadowano sesję: ${snapshot.directory.path}',
+        'Loaded session: ${snapshot.directory.path}',
+      );
     });
   }
 
@@ -389,12 +421,17 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _pendingPartialSystemAudioTranscription = '';
       _transcriptionSegments.clear();
       _explanations.clear();
+      _collapsedExplanationIds.clear();
       _microphonePartialCorrections.clear();
       _systemAudioPartialCorrections.clear();
       _currentSessionPath = null;
       _currentSessionProject = project;
       _selectedProject = project;
-      _statusMessage = statusMessage ?? 'Projekt nie ma jeszcze transkrypcji.';
+      _statusMessage = statusMessage ??
+          _t.pick(
+            'Projekt nie ma jeszcze transkrypcji.',
+            'This project does not have any transcripts yet.',
+          );
     });
   }
 
@@ -426,12 +463,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   void _refreshSignalLevels() {
     if (!mounted) return;
 
-    final microphoneTarget = _speechToText.isListening ? _microphoneSignalRaw : 0.0;
+    final microphoneTarget =
+        _speechToText.isListening ? _microphoneSignalRaw : 0.0;
     final systemTarget = _isSystemAudioListening ? _systemAudioSignalRaw : 0.0;
 
     setState(() {
-      _microphoneSignalLevel = _smoothedLevel(_microphoneSignalLevel, microphoneTarget);
-      _systemAudioSignalLevel = _smoothedLevel(_systemAudioSignalLevel, systemTarget);
+      _microphoneSignalLevel =
+          _smoothedLevel(_microphoneSignalLevel, microphoneTarget);
+      _systemAudioSignalLevel =
+          _smoothedLevel(_systemAudioSignalLevel, systemTarget);
     });
   }
 
@@ -445,6 +485,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     if (!mounted) return;
 
     setState(() {
+      _selectedInterfaceLanguage = settings.interfaceLanguage;
       _selectedLocaleId = settings.speechLanguage;
       _selectedAnswerLanguage = settings.answerLanguage;
       _selectedSource = settings.audioSource;
@@ -457,22 +498,29 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           settings.sidebarAutoCorrectionFraction.clamp(0.25, 0.75).toDouble();
       _explanationCharacterTarget =
           settings.explanationCharacterTarget.clamp(120, 2500).toInt();
-      _explanationLengthController.text = _explanationCharacterTarget.toString();
+      _explanationLengthController.text =
+          _explanationCharacterTarget.toString();
     });
   }
 
   void _initSpeech() async {
     _speechToText = SpeechToText();
     bool available = await _speechToText.initialize(
-      onStatus: (status) => print('onStatus: $status'),
-      onError: (errorNotification) => print('onError: $errorNotification'),
+      onStatus: (status) => debugPrint('onStatus: $status'),
+      onError: (errorNotification) => debugPrint('onError: $errorNotification'),
     );
-    print('Speech recognition available: $available');
+    debugPrint('Speech recognition available: $available');
     setState(() {
       _speechEnabled = available;
       _statusMessage = available
-          ? 'Gotowe do transkrypcji z mikrofonu.'
-          : 'Rozpoznawanie mowy nie jest dostępne.';
+          ? _t.pick(
+              'Gotowe do transkrypcji z mikrofonu.',
+              'Ready to transcribe from the microphone.',
+            )
+          : _t.pick(
+              'Rozpoznawanie mowy nie jest dostępne.',
+              'Speech recognition is not available.',
+            );
     });
   }
 
@@ -490,7 +538,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         source: _TranscriptSource.microphone,
       );
     }
-    print('Recognized words: ${result.recognizedWords}');
+    debugPrint('Recognized words: ${result.recognizedWords}');
   }
 
   void _startListening() async {
@@ -512,8 +560,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   Future<void> _ensureActiveSession() async {
     if (_sessionService.currentSessionDirectory != null) {
       setState(() {
-        _statusMessage =
-            'Kontynuacja sesji: ${_sessionService.currentSessionDirectory!.path}';
+        _statusMessage = _t.pick(
+          'Kontynuacja sesji: ${_sessionService.currentSessionDirectory!.path}',
+          'Continuing session: ${_sessionService.currentSessionDirectory!.path}',
+        );
       });
       return;
     }
@@ -542,101 +592,127 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _pendingPartialSystemAudioTranscription = '';
       _transcriptionSegments.clear();
       _explanations.clear();
+      _collapsedExplanationIds.clear();
       _microphonePartialCorrections.clear();
       _systemAudioPartialCorrections.clear();
       _currentSessionPath = directory.path;
       _currentSessionProject = project;
       _selectedProject = project;
-      _statusMessage = 'Sesja zapisywana w ${directory.path}';
+      _statusMessage = _t.pick(
+        'Sesja zapisywana w ${directory.path}',
+        'Session is being saved in ${directory.path}',
+      );
     });
     await _loadAutoCorrections(project: project);
     await _refreshSessionLibrary();
   }
 
-Future<void> _startMicrophoneListening({bool updateStatus = true}) async {
-  print('Start microphone listening');
-  if (updateStatus) {
-    setState(() => _statusMessage = 'Nasłuchiwanie mikrofonu...');
-  }
-  await _speechToText.listen(
-    onResult: _onSpeechResult,
-    onSoundLevelChange: _handleMicrophoneSoundLevel,
-    localeId: _selectedLocaleId,
-    listenMode: ListenMode.dictation,
-  );
-  setState(() {});
-}
-
-void _stopListening() async {
-  if (_selectedSource == 'both') {
-    await _stopCombinedListening();
-    return;
-  }
-
-  if (_selectedSource == 'system') {
-    await _stopSystemAudioListening();
-    return;
-  }
-
-  await _stopMicrophoneListening();
-}
-
-Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
-  print('Stop microphone listening');
-  await _speechToText.stop();
-  setState(() {
-    _commitPartialTranscript(
-      '',
-      source: _TranscriptSource.microphone,
-    );
-    _microphoneSignalRaw = 0;
-    _microphoneSignalLevel = 0;
+  Future<void> _startMicrophoneListening({bool updateStatus = true}) async {
+    debugPrint('Start microphone listening');
     if (updateStatus) {
-      _statusMessage = 'Zatrzymano mikrofon.';
+      setState(() => _statusMessage = _t.pick(
+            'Nasłuchiwanie mikrofonu...',
+            'Listening to the microphone...',
+          ));
     }
-  });
-  if (updateStatus) {
-    await _refreshSessionLibraryImmediately();
+    await _speechToText.listen(
+      onResult: _onSpeechResult,
+      onSoundLevelChange: _handleMicrophoneSoundLevel,
+      localeId: _selectedLocaleId,
+      listenOptions: SpeechListenOptions(listenMode: ListenMode.dictation),
+    );
+    setState(() {});
   }
-}
+
+  void _stopListening() async {
+    if (_selectedSource == 'both') {
+      await _stopCombinedListening();
+      return;
+    }
+
+    if (_selectedSource == 'system') {
+      await _stopSystemAudioListening();
+      return;
+    }
+
+    await _stopMicrophoneListening();
+  }
+
+  Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
+    debugPrint('Stop microphone listening');
+    await _speechToText.stop();
+    setState(() {
+      _commitPartialTranscript(
+        '',
+        source: _TranscriptSource.microphone,
+      );
+      _microphoneSignalRaw = 0;
+      _microphoneSignalLevel = 0;
+      if (updateStatus) {
+        _statusMessage = _t.pick('Zatrzymano mikrofon.', 'Microphone stopped.');
+      }
+    });
+    if (updateStatus) {
+      await _refreshSessionLibraryImmediately();
+    }
+  }
 
   Future<void> _startCombinedListening() async {
-    print('Start combined listening');
-    setState(() => _statusMessage = 'Uruchamianie mikrofonu i audio systemowego...');
+    debugPrint('Start combined listening');
+    setState(() => _statusMessage = _t.pick(
+          'Uruchamianie mikrofonu i audio systemowego...',
+          'Starting microphone and system audio...',
+        ));
 
     try {
       await _startSystemAudioListening(updateStatus: false);
       await _startMicrophoneListening(updateStatus: false);
-      setState(() => _statusMessage = 'Nasłuchiwanie mikrofonu i audio systemowego...');
+      setState(() => _statusMessage = _t.pick(
+            'Nasłuchiwanie mikrofonu i audio systemowego...',
+            'Listening to microphone and system audio...',
+          ));
     } catch (error) {
-      setState(() => _statusMessage = 'Nie udało się uruchomić trybu łączonego: $error');
+      setState(() => _statusMessage = _t.pick(
+            'Nie udało się uruchomić trybu łączonego: $error',
+            'Could not start combined mode: $error',
+          ));
     }
   }
 
   Future<void> _stopCombinedListening() async {
-    print('Stop combined listening');
+    debugPrint('Stop combined listening');
     await _stopMicrophoneListening(updateStatus: false);
     await _stopSystemAudioListening(updateStatus: false);
-    setState(() => _statusMessage = 'Zatrzymano mikrofon i audio systemowe.');
+    setState(() => _statusMessage = _t.pick(
+          'Zatrzymano mikrofon i audio systemowe.',
+          'Microphone and system audio stopped.',
+        ));
     await _refreshSessionLibraryImmediately();
   }
 
   Future<void> _startSystemAudioListening({bool updateStatus = true}) async {
-    print('Start system audio listening');
+    debugPrint('Start system audio listening');
     setState(() {
       _isSystemAudioListening = true;
       if (updateStatus) {
-        _statusMessage = 'Uruchamianie przechwytywania audio systemowego...';
+        _statusMessage = _t.pick(
+          'Uruchamianie przechwytywania audio systemowego...',
+          'Starting system audio capture...',
+        );
       }
     });
 
     await _systemAudioSubscription?.cancel();
-    _systemAudioSubscription = _systemAudioEvents.receiveBroadcastStream().listen(
+    _systemAudioSubscription =
+        _systemAudioEvents.receiveBroadcastStream().listen(
       _handleSystemAudioEvent,
       onError: (error) {
         setState(() {
           _isSystemAudioListening = false;
-          _statusMessage = 'Błąd audio systemowego: $error';
+          _statusMessage = _t.pick(
+            'Błąd audio systemowego: $error',
+            'System audio error: $error',
+          );
         });
       },
     );
@@ -646,20 +722,26 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         'localeId': _selectedLocaleId,
       });
       if (updateStatus) {
-        setState(() => _statusMessage = 'Nasłuchiwanie audio systemowego...');
+        setState(() => _statusMessage = _t.pick(
+              'Nasłuchiwanie audio systemowego...',
+              'Listening to system audio...',
+            ));
       }
     } catch (error) {
       await _systemAudioSubscription?.cancel();
       _systemAudioSubscription = null;
       setState(() {
         _isSystemAudioListening = false;
-        _statusMessage = 'Nie udało się uruchomić audio systemowego: $error';
+        _statusMessage = _t.pick(
+          'Nie udało się uruchomić audio systemowego: $error',
+          'Could not start system audio: $error',
+        );
       });
     }
   }
 
   Future<void> _stopSystemAudioListening({bool updateStatus = true}) async {
-    print('Stop system audio listening');
+    debugPrint('Stop system audio listening');
     try {
       await _systemAudioControl.invokeMethod('stop');
     } finally {
@@ -674,7 +756,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         _systemAudioSignalRaw = 0;
         _systemAudioSignalLevel = 0;
         if (updateStatus) {
-          _statusMessage = 'Zatrzymano audio systemowe.';
+          _statusMessage = _t.pick(
+            'Zatrzymano audio systemowe.',
+            'System audio stopped.',
+          );
         }
       });
       if (updateStatus) {
@@ -706,7 +791,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     } else if (type == 'status') {
       setState(() => _statusMessage = event['message'] as String?);
     } else if (type == 'error') {
-      setState(() => _statusMessage = 'Błąd rozpoznawania: ${event['message']}');
+      setState(() => _statusMessage = _t.pick(
+            'Błąd rozpoznawania: ${event['message']}',
+            'Recognition error: ${event['message']}',
+          ));
     } else if (type == 'level') {
       final level = event['level'];
       if (level is num) {
@@ -735,7 +823,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         _isLikelySameSegment(_transcriptionSegments.last, trimmed)) {
       return false;
     }
-    if (committedText.isNotEmpty && committedText.endsWith(trimmed)) return false;
+    if (committedText.isNotEmpty && committedText.endsWith(trimmed)) {
+      return false;
+    }
 
     _transcriptionSegments.add(trimmed);
     _appendTranscriptToController(trimmed);
@@ -794,8 +884,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         if (first[i - 1] == second[j - 1]) {
           currentRow[j] = previousRow[j - 1] + 1;
         } else {
-          currentRow[j] =
-              previousRow[j] > currentRow[j - 1] ? previousRow[j] : currentRow[j - 1];
+          currentRow[j] = previousRow[j] > currentRow[j - 1]
+              ? previousRow[j]
+              : currentRow[j - 1];
         }
       }
       for (var j = 0; j <= second.length; j += 1) {
@@ -805,11 +896,13 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     }
 
     final longestCommonSubsequence = previousRow[second.length];
-    final longestLength = first.length > second.length ? first.length : second.length;
+    final longestLength =
+        first.length > second.length ? first.length : second.length;
     return longestCommonSubsequence / longestLength;
   }
 
-  void _updatePartialTranscript(String text, {required _TranscriptSource source}) {
+  void _updatePartialTranscript(String text,
+      {required _TranscriptSource source}) {
     final trimmed = _applyPartialCorrections(text.trim(), source);
     if (source == _TranscriptSource.microphone) {
       _pendingPartialMicrophoneTranscription = trimmed;
@@ -830,27 +923,19 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     setState(() {
       if (_pendingPartialMicrophoneTranscription.isNotEmpty ||
           _partialMicrophoneTranscription.isNotEmpty) {
-        _partialMicrophoneTranscription = _pendingPartialMicrophoneTranscription;
+        _partialMicrophoneTranscription =
+            _pendingPartialMicrophoneTranscription;
       }
       if (_pendingPartialSystemAudioTranscription.isNotEmpty ||
           _partialSystemAudioTranscription.isNotEmpty) {
-        _partialSystemAudioTranscription = _pendingPartialSystemAudioTranscription;
+        _partialSystemAudioTranscription =
+            _pendingPartialSystemAudioTranscription;
       }
     });
   }
 
-  void _setPartialTranscriptImmediately(String text, _TranscriptSource source) {
-    final trimmed = _applyPartialCorrections(text.trim(), source);
-    if (source == _TranscriptSource.microphone) {
-      _partialMicrophoneTranscription = trimmed;
-      _pendingPartialMicrophoneTranscription = trimmed;
-    } else {
-      _partialSystemAudioTranscription = trimmed;
-      _pendingPartialSystemAudioTranscription = trimmed;
-    }
-  }
-
-  void _commitPartialTranscript(String text, {required _TranscriptSource source}) {
+  void _commitPartialTranscript(String text,
+      {required _TranscriptSource source}) {
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
 
@@ -861,8 +946,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         ? _partialMicrophoneTranscription
         : _partialSystemAudioTranscription;
     final rawText = text.trim().isNotEmpty ? text : pendingText;
-    final trimmed =
-        _applyPartialCorrections(rawText.trim().isNotEmpty ? rawText : displayText, source);
+    final trimmed = _applyPartialCorrections(
+        rawText.trim().isNotEmpty ? rawText : displayText, source);
     if (trimmed.isEmpty) {
       if (source == _TranscriptSource.microphone) {
         _partialMicrophoneTranscription = '';
@@ -910,7 +995,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
     return text.replaceAllMapped(matcher, (match) {
       final matchedText = match.group(0) ?? '';
-      return _autoCorrectionReplacements[matchedText.toLowerCase()] ?? matchedText;
+      return _autoCorrectionReplacements[matchedText.toLowerCase()] ??
+          matchedText;
     });
   }
 
@@ -1008,7 +1094,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       ..sort((a, b) => b.original.length.compareTo(a.original.length));
 
     _autoCorrectionReplacements = {
-      for (final rule in enabledRules) rule.original.toLowerCase(): rule.replacement,
+      for (final rule in enabledRules)
+        rule.original.toLowerCase(): rule.replacement,
     };
 
     if (enabledRules.isEmpty) {
@@ -1016,9 +1103,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       return;
     }
 
-    final alternatives = enabledRules
-        .map((rule) => RegExp.escape(rule.original))
-        .join('|');
+    final alternatives =
+        enabledRules.map((rule) => RegExp.escape(rule.original)).join('|');
     _autoCorrectionMatcher = RegExp(
       '(?<![\\p{L}\\p{N}])(?:$alternatives)(?![\\p{L}\\p{N}])',
       caseSensitive: false,
@@ -1045,8 +1131,14 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       );
       _rebuildAutoCorrectionMatcher();
       _statusMessage = enabled
-          ? 'Włączono autokorektę: ${rule.original} -> ${rule.replacement}'
-          : 'Wyłączono autokorektę: ${rule.original} -> ${rule.replacement}';
+          ? _t.pick(
+              'Włączono autokorektę: ${rule.original} -> ${rule.replacement}',
+              'Enabled auto-correction: ${rule.original} -> ${rule.replacement}',
+            )
+          : _t.pick(
+              'Wyłączono autokorektę: ${rule.original} -> ${rule.replacement}',
+              'Disabled auto-correction: ${rule.original} -> ${rule.replacement}',
+            );
     });
     _persistAutoCorrections();
   }
@@ -1055,7 +1147,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     setState(() {
       _autoCorrectionRules.removeWhere((item) => item.id == rule.id);
       _rebuildAutoCorrectionMatcher();
-      _statusMessage = 'Usunięto autokorektę: ${rule.original} -> ${rule.replacement}';
+      _statusMessage = _t.pick(
+        'Usunięto autokorektę: ${rule.original} -> ${rule.replacement}',
+        'Deleted auto-correction: ${rule.original} -> ${rule.replacement}',
+      );
     });
     _persistAutoCorrections();
   }
@@ -1084,7 +1179,14 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
   void _copyTranscription() {
     Clipboard.setData(ClipboardData(text: _transcription));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Transkrypcja skopiowana do schowka')),
+      SnackBar(
+        content: Text(
+          _t.pick(
+            'Transkrypcja skopiowana do schowka',
+            'Transcript copied to clipboard',
+          ),
+        ),
+      ),
     );
   }
 
@@ -1100,7 +1202,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       _transcriptionSegments.clear();
       _microphonePartialCorrections.clear();
       _systemAudioPartialCorrections.clear();
-      _statusMessage = 'Wyczyszczono transkrypcję z widoku. Pliki lokalne zostały.';
+      _statusMessage = _t.pick(
+        'Wyczyszczono transkrypcję z widoku. Pliki lokalne zostały.',
+        'Transcript cleared from the view. Local files were kept.',
+      );
     });
   }
 
@@ -1115,12 +1220,18 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
     Clipboard.setData(ClipboardData(text: message));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Komunikat skopiowany do schowka')),
+      SnackBar(
+        content: Text(
+          _t.pick(
+              'Komunikat skopiowany do schowka', 'Message copied to clipboard'),
+        ),
+      ),
     );
   }
 
   Future<void> _saveCurrentPreferences() async {
     await saveAppPreferences(
+      interfaceLanguage: _selectedInterfaceLanguage,
       speechLanguage: _selectedLocaleId,
       answerLanguage: _selectedAnswerLanguage,
       audioSource: _selectedSource,
@@ -1151,7 +1262,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
   Future<void> _loadSession(LocalSessionSummary summary) async {
     if (_isListening) {
-      setState(() => _statusMessage = 'Zatrzymaj transkrypcję przed zmianą sesji.');
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymaj transkrypcję przed zmianą sesji.',
+            'Stop transcription before changing sessions.',
+          ));
       return;
     }
 
@@ -1164,7 +1278,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
   Future<void> _selectProject(String project) async {
     if (_isListening) {
-      setState(() => _statusMessage = 'Zatrzymaj transkrypcję przed zmianą projektu.');
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymaj transkrypcję przed zmianą projektu.',
+            'Stop transcription before changing projects.',
+          ));
       return;
     }
 
@@ -1180,12 +1297,16 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (projectSessions.isEmpty) {
       _clearLoadedSession(
         project: targetProject,
-        statusMessage: 'Wybrany projekt nie ma jeszcze transkrypcji.',
+        statusMessage: _t.pick(
+          'Wybrany projekt nie ma jeszcze transkrypcji.',
+          'The selected project does not have any transcripts yet.',
+        ),
       );
       return;
     }
 
-    final snapshot = await _sessionService.loadSession(projectSessions.first.directory);
+    final snapshot =
+        await _sessionService.loadSession(projectSessions.first.directory);
     if (!mounted || _selectedProject != targetProject) return;
 
     _applySessionSnapshot(snapshot);
@@ -1195,7 +1316,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
   Future<void> _createNewSessionInSelectedProject() async {
     if (_isListening) {
-      setState(() => _statusMessage = 'Zatrzymaj transkrypcję przed utworzeniem nowej sesji.');
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymaj transkrypcję przed utworzeniem nowej sesji.',
+            'Stop transcription before creating a new session.',
+          ));
       return;
     }
 
@@ -1208,24 +1332,24 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Nowy projekt'),
+          title: Text(_t.pick('Nowy projekt', 'New project')),
           content: TextField(
             controller: controller,
             autofocus: true,
-            decoration: const InputDecoration(
-              labelText: 'Nazwa projektu',
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              labelText: _t.pick('Nazwa projektu', 'Project name'),
+              border: const OutlineInputBorder(),
             ),
             onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Anuluj'),
+              child: Text(_t.pick('Anuluj', 'Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-              child: const Text('Utwórz'),
+              child: Text(_t.pick('Utwórz', 'Create')),
             ),
           ],
         );
@@ -1240,7 +1364,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (!mounted) return;
     _clearLoadedSession(
       project: trimmed,
-      statusMessage: 'Utworzono pusty projekt: $trimmed',
+      statusMessage: _t.pick(
+        'Utworzono pusty projekt: $trimmed',
+        'Created empty project: $trimmed',
+      ),
     );
     await _loadAutoCorrections(project: trimmed);
     await _refreshSessionLibrary();
@@ -1267,28 +1394,28 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Zmień nazwę transkrypcji'),
+          title: Text(_t.pick('Zmień nazwę transkrypcji', 'Rename transcript')),
           content: TextField(
             controller: controller,
             autofocus: true,
-            decoration: const InputDecoration(
-              labelText: 'Nazwa',
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              labelText: _t.pick('Nazwa', 'Name'),
+              border: const OutlineInputBorder(),
             ),
             onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Anuluj'),
+              child: Text(_t.pick('Anuluj', 'Cancel')),
             ),
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(''),
-              child: const Text('Usuń nazwę'),
+              child: Text(_t.pick('Usuń nazwę', 'Clear name')),
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-              child: const Text('Zapisz'),
+              child: Text(_t.pick('Zapisz', 'Save')),
             ),
           ],
         );
@@ -1303,15 +1430,24 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (summary.directory.path == _currentSessionPath && mounted) {
       setState(() {
         _statusMessage = newTitle.trim().isEmpty
-            ? 'Usunięto własną nazwę transkrypcji.'
-            : 'Zmieniono nazwę transkrypcji.';
+            ? _t.pick(
+                'Usunięto własną nazwę transkrypcji.',
+                'Custom transcript name removed.',
+              )
+            : _t.pick(
+                'Zmieniono nazwę transkrypcji.',
+                'Transcript renamed.',
+              );
       });
     }
   }
 
   Future<void> _deleteSession(LocalSessionSummary summary) async {
     if (_isListening) {
-      setState(() => _statusMessage = 'Zatrzymaj transkrypcję przed usunięciem sesji.');
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymaj transkrypcję przed usunięciem sesji.',
+            'Stop transcription before deleting a session.',
+          ));
       return;
     }
 
@@ -1319,18 +1455,21 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Usunąć transkrypcję?'),
+          title: Text(_t.pick('Usunąć transkrypcję?', 'Delete transcript?')),
           content: Text(
-            'Transkrypcja "${summary.title}" zostanie przeniesiona do Kosza.',
+            _t.pick(
+              'Transkrypcja "${summary.title}" zostanie przeniesiona do Kosza.',
+              'Transcript "${summary.title}" will be moved to Trash.',
+            ),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Anuluj'),
+              child: Text(_t.pick('Anuluj', 'Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Przenieś do Kosza'),
+              child: Text(_t.pick('Przenieś do Kosza', 'Move to Trash')),
             ),
           ],
         );
@@ -1339,7 +1478,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (confirmed != true) return;
 
     final wasCurrentSession = summary.directory.path == _currentSessionPath;
-    final trashedDirectory = await _sessionService.moveSessionToTrash(summary.directory);
+    final trashedDirectory =
+        await _sessionService.moveSessionToTrash(summary.directory);
     if (!mounted) return;
 
     if (wasCurrentSession) {
@@ -1352,6 +1492,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         _pendingPartialSystemAudioTranscription = '';
         _transcriptionSegments.clear();
         _explanations.clear();
+        _collapsedExplanationIds.clear();
         _microphonePartialCorrections.clear();
         _systemAudioPartialCorrections.clear();
         _currentSessionPath = null;
@@ -1360,7 +1501,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     }
 
     setState(() {
-      _statusMessage = 'Przeniesiono transkrypcję do Kosza: ${trashedDirectory.path}';
+      _statusMessage = _t.pick(
+        'Przeniesiono transkrypcję do Kosza: ${trashedDirectory.path}',
+        'Moved transcript to Trash: ${trashedDirectory.path}',
+      );
     });
     await _refreshSessionLibrary();
   }
@@ -1370,31 +1514,37 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (project == LocalSessionService.defaultProject) return;
 
     if (_isListening) {
-      setState(() => _statusMessage = 'Zatrzymaj transkrypcję przed usunięciem projektu.');
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymaj transkrypcję przed usunięciem projektu.',
+            'Stop transcription before deleting a project.',
+          ));
       return;
     }
 
-    final sessionCount = _sessionSummaries
-        .where((summary) => summary.project == project)
-        .length;
+    final sessionCount =
+        _sessionSummaries.where((summary) => summary.project == project).length;
     final autoCorrectionCount = _autoCorrectionRules.length;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Usunąć projekt?'),
+          title: Text(_t.pick('Usunąć projekt?', 'Delete project?')),
           content: Text(
-            'Projekt "$project" zostanie przeniesiony do Kosza razem z '
-            '$sessionCount transkrypcjami i $autoCorrectionCount autokorektami.',
+            _t.pick(
+              'Projekt "$project" zostanie przeniesiony do Kosza razem z '
+                  '$sessionCount transkrypcjami i $autoCorrectionCount autokorektami.',
+              'Project "$project" will be moved to Trash together with '
+                  '$sessionCount transcripts and $autoCorrectionCount auto-corrections.',
+            ),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Anuluj'),
+              child: Text(_t.pick('Anuluj', 'Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Przenieś do Kosza'),
+              child: Text(_t.pick('Przenieś do Kosza', 'Move to Trash')),
             ),
           ],
         );
@@ -1420,11 +1570,15 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         _pendingPartialSystemAudioTranscription = '';
         _transcriptionSegments.clear();
         _explanations.clear();
+        _collapsedExplanationIds.clear();
         _microphonePartialCorrections.clear();
         _systemAudioPartialCorrections.clear();
         _currentSessionPath = null;
       }
-      _statusMessage = 'Przeniesiono projekt do Kosza: ${trashedDirectory.path}';
+      _statusMessage = _t.pick(
+        'Przeniesiono projekt do Kosza: ${trashedDirectory.path}',
+        'Moved project to Trash: ${trashedDirectory.path}',
+      );
     });
     await _loadAutoCorrections(project: LocalSessionService.defaultProject);
     await _refreshSessionLibrary();
@@ -1434,18 +1588,38 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     final settings = await getOpenAiSettings();
     final controller = TextEditingController(text: settings.apiKey ?? '');
     var rememberApiKey = settings.rememberApiKey;
+    var interfaceLanguage = _selectedInterfaceLanguage;
 
     if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('Ustawienia OpenAI'),
-          content: StatefulBuilder(
-            builder: (context, setDialogState) {
-              return Column(
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final dialogStrings = AppStrings.forLanguage(interfaceLanguage);
+            return AlertDialog(
+              title: Text(dialogStrings.pick('Ustawienia', 'Settings')),
+              content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  DropdownButtonFormField<String>(
+                    value: interfaceLanguage,
+                    decoration: InputDecoration(
+                      labelText: dialogStrings.pick(
+                        'Język interfejsu',
+                        'Interface language',
+                      ),
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'pl', child: Text('Polski')),
+                      DropdownMenuItem(value: 'en', child: Text('English')),
+                    ],
+                    onChanged: (value) {
+                      setDialogState(() => interfaceLanguage = value ?? 'pl');
+                    },
+                  ),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: controller,
                     decoration: const InputDecoration(
@@ -1457,50 +1631,66 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                   const SizedBox(height: 12),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Zapamiętaj API key na tym komputerze'),
+                    title: Text(
+                      dialogStrings.pick(
+                        'Zapamiętaj API key na tym komputerze',
+                        'Remember API key on this computer',
+                      ),
+                    ),
                     value: rememberApiKey,
                     onChanged: (value) {
                       setDialogState(() => rememberApiKey = value ?? true);
                     },
                   ),
                 ],
-              );
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Anuluj'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                await saveOpenAiSettings(
-                  apiKey: controller.text,
-                  rememberApiKey: rememberApiKey,
-                  speechLanguage: _selectedLocaleId,
-                  answerLanguage: _selectedAnswerLanguage,
-                  audioSource: _selectedSource,
-                  transcriptionPanelFraction: _transcriptionPanelFraction,
-                  sidebarWidth: _sidebarWidth,
-                  sidebarSessionFraction: _sidebarSessionFraction,
-                  sidebarAutoCorrectionFraction: _sidebarAutoCorrectionFraction,
-                  explanationCharacterTarget: _explanationCharacterTarget,
-                );
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      rememberApiKey
-                          ? 'API key zapisany lokalnie'
-                          : 'API key nie będzie zapamiętany',
-                    ),
-                  ),
-                );
-              },
-              child: const Text('Zapisz'),
-            ),
-          ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(dialogStrings.pick('Anuluj', 'Cancel')),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    await saveOpenAiSettings(
+                      apiKey: controller.text,
+                      rememberApiKey: rememberApiKey,
+                      interfaceLanguage: interfaceLanguage,
+                      speechLanguage: _selectedLocaleId,
+                      answerLanguage: _selectedAnswerLanguage,
+                      audioSource: _selectedSource,
+                      transcriptionPanelFraction: _transcriptionPanelFraction,
+                      sidebarWidth: _sidebarWidth,
+                      sidebarSessionFraction: _sidebarSessionFraction,
+                      sidebarAutoCorrectionFraction:
+                          _sidebarAutoCorrectionFraction,
+                      explanationCharacterTarget: _explanationCharacterTarget,
+                    );
+                    if (!context.mounted) return;
+                    setState(() {
+                      _selectedInterfaceLanguage = interfaceLanguage;
+                    });
+                    Navigator.of(context).pop();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          rememberApiKey
+                              ? dialogStrings.pick(
+                                  'API key zapisany lokalnie',
+                                  'API key saved locally',
+                                )
+                              : dialogStrings.pick(
+                                  'API key nie będzie zapamiętany',
+                                  'API key will not be remembered',
+                                ),
+                        ),
+                      ),
+                    );
+                  },
+                  child: Text(dialogStrings.pick('Zapisz', 'Save')),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -1534,9 +1724,17 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _SignalLevelIndicator(label: 'Mic', level: _microphoneSignalLevel),
+          _SignalLevelIndicator(
+            label: 'Mic',
+            level: _microphoneSignalLevel,
+            strings: _t,
+          ),
           const SizedBox(width: 12),
-          _SignalLevelIndicator(label: 'System', level: _systemAudioSignalLevel),
+          _SignalLevelIndicator(
+            label: 'System',
+            level: _systemAudioSignalLevel,
+            strings: _t,
+          ),
         ],
       );
     }
@@ -1544,6 +1742,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     return _SignalLevelIndicator(
       label: _selectedSource == 'system' ? 'System' : 'Mic',
       level: _signalLevel,
+      strings: _t,
     );
   }
 
@@ -1570,7 +1769,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     final tokenRange = _termRangeForToken(token);
     final initialTerm = _normalizeTerm(token.text);
     if (initialTerm.isEmpty) {
-      setState(() => _statusMessage = 'Kliknięty fragment nie wygląda jak termin.');
+      setState(() => _statusMessage = _t.pick(
+            'Kliknięty fragment nie wygląda jak termin.',
+            'The clicked fragment does not look like a term.',
+          ));
       return;
     }
 
@@ -1583,7 +1785,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
             return AlertDialog(
-              title: const Text('Korekta terminu'),
+              title: Text(_t.pick('Korekta terminu', 'Correct term')),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1591,9 +1793,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                     controller: controller,
                     autofocus: true,
                     textInputAction: TextInputAction.done,
-                    decoration: const InputDecoration(
-                      labelText: 'Termin lub fraza',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: _t.pick('Termin lub fraza', 'Term or phrase'),
+                      border: const OutlineInputBorder(),
                     ),
                     onSubmitted: (value) {
                       submittedTerm = value;
@@ -1604,9 +1806,11 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     value: addToAutoCorrection,
-                    title: const Text('Dodaj do autokorekty'),
+                    title: Text(_t.pick(
+                        'Dodaj do autokorekty', 'Add to auto-correction')),
                     onChanged: (value) {
-                      setDialogState(() => addToAutoCorrection = value ?? false);
+                      setDialogState(
+                          () => addToAutoCorrection = value ?? false);
                     },
                   ),
                 ],
@@ -1614,7 +1818,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Anuluj'),
+                  child: Text(_t.pick('Anuluj', 'Cancel')),
                 ),
                 TextButton(
                   onPressed: () => Navigator.of(dialogContext).pop('ok'),
@@ -1622,7 +1826,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 ),
                 FilledButton(
                   onPressed: () => Navigator.of(dialogContext).pop('explain'),
-                  child: const Text('Wyjaśnij'),
+                  child: Text(_t.pick('Wyjaśnij', 'Explain')),
                 ),
               ],
             );
@@ -1636,7 +1840,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
 
     if (action == null) return;
     if (term.isEmpty && action != 'ok') {
-      setState(() => _statusMessage = 'Termin jest pusty.');
+      setState(() => _statusMessage = _t.pick(
+            'Termin jest pusty.',
+            'The term is empty.',
+          ));
       return;
     }
 
@@ -1655,7 +1862,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       quietIfUnavailable: true,
       addToAutoCorrection: addToAutoCorrection,
     );
-    await _createExplanation(term, _wordIndexForOffset(_transcription, tokenRange.start));
+    await _createExplanation(
+        term, _wordIndexForOffset(_transcription, tokenRange.start));
   }
 
   TextRange _termRangeForToken(TranscriptToken token) {
@@ -1691,7 +1899,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     if (location == null) {
       if (!quietIfUnavailable) {
         setState(() {
-          _statusMessage = 'Nie udało się ustalić miejsca korekty w transkrypcji.';
+          _statusMessage = _t.pick(
+            'Nie udało się ustalić miejsca korekty w transkrypcji.',
+            'Could not locate the correction range in the transcript.',
+          );
         });
       }
       return false;
@@ -1712,8 +1923,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         trimmed,
       );
       setState(() {
-        final learnedAutoCorrection =
-            addToAutoCorrection ? _upsertAutoCorrection(original, trimmed) : false;
+        final learnedAutoCorrection = addToAutoCorrection
+            ? _upsertAutoCorrection(original, trimmed)
+            : false;
         _transcriptionController.value = TextEditingValue(
           text: newText,
           selection: TextSelection.collapsed(
@@ -1723,11 +1935,20 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
           ),
         );
         if (trimmed.isEmpty) {
-          _statusMessage = 'Usunięto termin: $original';
+          _statusMessage = _t.pick(
+            'Usunięto termin: $original',
+            'Deleted term: $original',
+          );
         } else {
           _statusMessage = learnedAutoCorrection
-              ? 'Poprawiono termin i dodano autokorektę: $original -> $trimmed'
-              : 'Poprawiono termin: $trimmed';
+              ? _t.pick(
+                  'Poprawiono termin i dodano autokorektę: $original -> $trimmed',
+                  'Corrected term and added auto-correction: $original -> $trimmed',
+                )
+              : _t.pick(
+                  'Poprawiono termin: $trimmed',
+                  'Corrected term: $trimmed',
+                );
         }
       });
       if (addToAutoCorrection && original.trim() != trimmed) {
@@ -1760,8 +1981,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     setState(() {
       _setPartialTextFor(source, correctedPartial);
       if (original != trimmed) {
-        final learnedAutoCorrection =
-            addToAutoCorrection ? _upsertAutoCorrection(original, trimmed) : false;
+        final learnedAutoCorrection = addToAutoCorrection
+            ? _upsertAutoCorrection(original, trimmed)
+            : false;
         _partialCorrectionsFor(source).add(
           _PartialCorrection(
             original: original,
@@ -1771,13 +1993,24 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
           ),
         );
         if (learnedAutoCorrection) {
-          _statusMessage = 'Poprawiono roboczy termin i dodano autokorektę: '
-              '$original -> $trimmed';
+          _statusMessage = _t.pick(
+            'Poprawiono roboczy termin i dodano autokorektę: '
+                '$original -> $trimmed',
+            'Corrected draft term and added auto-correction: '
+                '$original -> $trimmed',
+          );
           return;
         }
       }
-      _statusMessage =
-          trimmed.isEmpty ? 'Usunięto roboczy termin: $original' : 'Poprawiono roboczy termin: $trimmed';
+      _statusMessage = trimmed.isEmpty
+          ? _t.pick(
+              'Usunięto roboczy termin: $original',
+              'Deleted draft term: $original',
+            )
+          : _t.pick(
+              'Poprawiono roboczy termin: $trimmed',
+              'Corrected draft term: $trimmed',
+            );
     });
     if (addToAutoCorrection && original != trimmed) {
       _persistAutoCorrections();
@@ -1810,7 +2043,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
   }
 
   _TranscriptLocation? _locationForDisplayRange(TextRange range) {
-    if (!range.isValid || range.start < 0 || range.start >= range.end) return null;
+    if (!range.isValid || range.start < 0 || range.start >= range.end) {
+      return null;
+    }
 
     final committedText = _committedTranscription;
     if (range.end <= committedText.length) {
@@ -1866,11 +2101,14 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     int start,
     int end,
   ) {
-    final before = _normalizedWords(text.substring(0, start.clamp(0, text.length).toInt()));
-    final after = _normalizedWords(text.substring(end.clamp(0, text.length).toInt()));
+    final before = _normalizedWords(
+        text.substring(0, start.clamp(0, text.length).toInt()));
+    final after =
+        _normalizedWords(text.substring(end.clamp(0, text.length).toInt()));
 
     return (
-      beforeWords: before.length <= 4 ? before : before.sublist(before.length - 4),
+      beforeWords:
+          before.length <= 4 ? before : before.sublist(before.length - 4),
       afterWords: after.length <= 4 ? after : after.sublist(0, 4),
     );
   }
@@ -1934,6 +2172,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         localContext: localContext,
         sessionContext: _sessionContext,
         answerLanguage: _selectedAnswerLanguage,
+        interfaceLanguage: _selectedInterfaceLanguage,
         characterTarget: _explanationCharacterTarget,
       );
       _updateExplanation(
@@ -1984,6 +2223,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     int id, {
     String? explanation,
     String? error,
+    List<ExplanationCitation> citations = const [],
     required bool isLoading,
   }) {
     setState(() {
@@ -1992,6 +2232,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       _explanations[index] = _explanations[index].copyWith(
         explanation: explanation,
         error: error,
+        citations: citations,
         isLoading: isLoading,
       );
 
@@ -2000,6 +2241,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
           term: _explanations[index].term,
           explanation: explanation,
           error: error,
+          citations: citations,
         );
       }
     });
@@ -2009,6 +2251,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     final question = _questionController.text.trim();
     if (question.isEmpty || _isAskingQuestion) return;
 
+    final useWebResearch =
+        _forceWebResearch || _questionNeedsWebResearch(question);
     _questionController.clear();
     final id = _nextExplanationId++;
     setState(() {
@@ -2017,11 +2261,19 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         0,
         ExplanationItem(
           id: id,
-          term: 'Pytanie: $question',
+          term: _t.pick('Pytanie: $question', 'Question: $question'),
           isLoading: true,
         ),
       );
-      _statusMessage = 'Wysyłam pytanie do OpenAI...';
+      _statusMessage = useWebResearch
+          ? _t.pick(
+              'Szukam w sieci i pytam OpenAI...',
+              'Searching the web and asking OpenAI...',
+            )
+          : _t.pick(
+              'Wysyłam pytanie do OpenAI...',
+              'Sending question to OpenAI...',
+            );
     });
 
     try {
@@ -2031,17 +2283,27 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         explanationsContext: _explanationsContext(excludeId: id),
         sessionContext: _sessionContext,
         answerLanguage: _selectedAnswerLanguage,
+        interfaceLanguage: _selectedInterfaceLanguage,
         characterTarget: _explanationCharacterTarget,
+        useWebSearch: useWebResearch,
       );
       _updateExplanation(
         id,
-        explanation: answer,
+        explanation: answer.text,
+        citations: answer.citations,
         isLoading: false,
       );
       if (mounted) {
         setState(() {
           _isAskingQuestion = false;
-          _statusMessage = 'Odpowiedź dodana do wyjaśnień.';
+          _statusMessage = _t.pick(
+            useWebResearch
+                ? 'Odpowiedź z web researchu dodana do wyjaśnień.'
+                : 'Odpowiedź dodana do wyjaśnień.',
+            useWebResearch
+                ? 'Web research answer added to explanations.'
+                : 'Answer added to explanations.',
+          );
         });
       }
     } catch (error) {
@@ -2053,10 +2315,52 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
       if (mounted) {
         setState(() {
           _isAskingQuestion = false;
-          _statusMessage = 'Nie udało się uzyskać odpowiedzi.';
+          _statusMessage = _t.pick(
+            'Nie udało się uzyskać odpowiedzi.',
+            'Could not get an answer.',
+          );
         });
       }
     }
+  }
+
+  bool _questionNeedsWebResearch(String question) {
+    final normalized = question.toLowerCase();
+    const triggers = [
+      'wyszukaj',
+      'znajdź',
+      'sprawdź w sieci',
+      'sprawdz w sieci',
+      'google',
+      'internet',
+      'www',
+      'url',
+      'link',
+      'ile kosztuje',
+      'cena',
+      'koszt',
+      'kup',
+      'sklep',
+      'aktualnie',
+      'aktualna',
+      'aktualny',
+      'dzisiaj',
+      'teraz',
+      'najnowsz',
+      'search',
+      'find',
+      'look up',
+      'web',
+      'online',
+      'price',
+      'cost',
+      'buy',
+      'latest',
+      'current',
+      'today',
+    ];
+
+    return triggers.any(normalized.contains);
   }
 
   String _explanationsContext({int? excludeId}) {
@@ -2066,10 +2370,16 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
             (item.explanation != null && item.explanation!.trim().isNotEmpty) ||
             (item.error != null && item.error!.trim().isNotEmpty))
         .map((item) {
-          final body = item.error ?? item.explanation ?? '';
-          return '${item.term}\n$body';
-        })
-        .join('\n\n---\n\n');
+      final body = item.error ?? item.explanation ?? '';
+      final citations = item.citations
+          .map((citation) => '${citation.title} ${citation.url}'.trim())
+          .join('\n');
+      return [
+        item.term,
+        body,
+        if (citations.isNotEmpty) citations,
+      ].join('\n');
+    }).join('\n\n---\n\n');
   }
 
   Widget _buildQuestionBar() {
@@ -2090,12 +2400,32 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 minLines: 1,
                 maxLines: 3,
                 textInputAction: TextInputAction.send,
-                decoration: const InputDecoration(
-                  labelText: 'Zadaj pytanie do transkrypcji i wyjaśnień',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  labelText: _t.pick(
+                    'Zadaj pytanie do transkrypcji i wyjaśnień',
+                    'Ask a question about the transcript and explanations',
+                  ),
+                  border: const OutlineInputBorder(),
                   isDense: true,
                 ),
                 onSubmitted: (_) => _askQuestion(),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Tooltip(
+              message: _t.pick(
+                'Wymuś web research dla tego typu pytań.',
+                'Force web research for questions like this.',
+              ),
+              child: FilterChip(
+                avatar: const Icon(Icons.public, size: 16),
+                label: const Text('Web'),
+                selected: _forceWebResearch,
+                onSelected: _isAskingQuestion
+                    ? null
+                    : (value) {
+                        setState(() => _forceWebResearch = value);
+                      },
               ),
             ),
             const SizedBox(width: 12),
@@ -2108,7 +2438,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.send),
-              label: const Text('Zapytaj'),
+              label: Text(_t.pick('Zapytaj', 'Ask')),
             ),
           ],
         ),
@@ -2135,17 +2465,20 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
             child: Row(
               children: [
                 Text(
-                  'Sesje',
+                  _t.pick('Sesje', 'Sessions'),
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const Spacer(),
                 IconButton(
-                  tooltip: 'Nowy projekt',
+                  tooltip: _t.pick('Nowy projekt', 'New project'),
                   icon: const Icon(Icons.create_new_folder_outlined),
                   onPressed: _showCreateProjectDialog,
                 ),
                 IconButton(
-                  tooltip: 'Nowa transkrypcja w projekcie',
+                  tooltip: _t.pick(
+                    'Nowa transkrypcja w projekcie',
+                    'New transcript in project',
+                  ),
                   icon: const Icon(Icons.note_add_outlined),
                   onPressed: _createNewSessionInSelectedProject,
                 ),
@@ -2161,9 +2494,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                     value: _projects.contains(_selectedProject)
                         ? _selectedProject
                         : LocalSessionService.defaultProject,
-                    decoration: const InputDecoration(
-                      labelText: 'Projekt',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: _t.pick('Projekt', 'Project'),
+                      border: const OutlineInputBorder(),
                       isDense: true,
                     ),
                     items: _projects
@@ -2171,25 +2504,27 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                           (project) => DropdownMenuItem(
                             value: project,
                             child: Text(
-                              project,
+                              _displayProjectName(project),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         )
                         .toList(),
                     onChanged: (value) {
-                      final project = value ?? LocalSessionService.defaultProject;
+                      final project =
+                          value ?? LocalSessionService.defaultProject;
                       _selectProject(project);
                     },
                   ),
                 ),
                 const SizedBox(width: 6),
                 IconButton(
-                  tooltip: 'Usuń projekt',
+                  tooltip: _t.pick('Usuń projekt', 'Delete project'),
                   icon: const Icon(Icons.delete_outline),
-                  onPressed: _selectedProject == LocalSessionService.defaultProject
-                      ? null
-                      : _deleteSelectedProject,
+                  onPressed:
+                      _selectedProject == LocalSessionService.defaultProject
+                          ? null
+                          : _deleteSelectedProject,
                 ),
               ],
             ),
@@ -2208,14 +2543,17 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                   );
                 }
 
-                final availableHeight = constraints.maxHeight - dividerHeight * 2;
-                final sessionHeight = (availableHeight * _sidebarSessionFraction)
-                    .clamp(110.0, availableHeight - 220.0)
-                    .toDouble();
+                final availableHeight =
+                    constraints.maxHeight - dividerHeight * 2;
+                final sessionHeight =
+                    (availableHeight * _sidebarSessionFraction)
+                        .clamp(110.0, availableHeight - 220.0)
+                        .toDouble();
                 final lowerHeight = availableHeight - sessionHeight;
-                final autoCorrectionsHeight = (lowerHeight * _sidebarAutoCorrectionFraction)
-                    .clamp(100.0, lowerHeight - 110.0)
-                    .toDouble();
+                final autoCorrectionsHeight =
+                    (lowerHeight * _sidebarAutoCorrectionFraction)
+                        .clamp(100.0, lowerHeight - 110.0)
+                        .toDouble();
                 final contextHeight = lowerHeight - autoCorrectionsHeight;
 
                 return Column(
@@ -2296,7 +2634,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         child: Padding(
           padding: const EdgeInsets.all(18),
           child: Text(
-            'Brak transkrypcji w tym projekcie.',
+            _t.pick(
+              'Brak transkrypcji w tym projekcie.',
+              'No transcripts in this project.',
+            ),
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium,
           ),
@@ -2313,7 +2654,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         final selected = summary.directory.path == _currentSessionPath;
         return Card(
           margin: EdgeInsets.zero,
-          color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+          color:
+              selected ? Theme.of(context).colorScheme.primaryContainer : null,
           child: ListTile(
             dense: true,
             selected: selected,
@@ -2325,7 +2667,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
             subtitle: Text(_formatSessionTime(summary.startedAt)),
             onTap: () => _loadSession(summary),
             trailing: PopupMenuButton<_SessionAction>(
-              tooltip: 'Opcje sesji',
+              tooltip: _t.pick('Opcje sesji', 'Session options'),
               onSelected: (action) {
                 if (action.rename) {
                   _renameSession(summary);
@@ -2336,20 +2678,25 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 }
               },
               itemBuilder: (context) => [
-                const PopupMenuItem(
-                  value: _SessionAction.rename(),
-                  child: Text('Zmień nazwę'),
+                PopupMenuItem(
+                  value: const _SessionAction.rename(),
+                  child: Text(_t.pick('Zmień nazwę', 'Rename')),
                 ),
-                const PopupMenuItem(
-                  value: _SessionAction.delete(),
-                  child: Text('Usuń'),
+                PopupMenuItem(
+                  value: const _SessionAction.delete(),
+                  child: Text(_t.pick('Usuń', 'Delete')),
                 ),
                 const PopupMenuDivider(),
                 ..._projects.map(
                   (project) => PopupMenuItem(
                     value: _SessionAction.move(project),
                     enabled: project != summary.project,
-                    child: Text('Przenieś do: $project'),
+                    child: Text(
+                      _t.pick(
+                        'Przenieś do: ${_displayProjectName(project)}',
+                        'Move to: ${_displayProjectName(project)}',
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -2369,13 +2716,13 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
           child: Row(
             children: [
               Text(
-                'Autokorekty',
+                _t.pick('Autokorekty', 'Auto-corrections'),
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _selectedProject,
+                  _displayProjectName(_selectedProject),
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelMedium,
                 ),
@@ -2394,7 +2741,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                   child: Padding(
                     padding: const EdgeInsets.all(18),
                     child: Text(
-                      'Popraw termin w transkrypcji, a reguła pojawi się tutaj.',
+                      _t.pick(
+                        'Popraw termin w transkrypcji, a reguła pojawi się tutaj.',
+                        'Correct a term in the transcript and the rule will appear here.',
+                      ),
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
@@ -2421,7 +2771,10 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                           overflow: TextOverflow.ellipsis,
                         ),
                         trailing: IconButton(
-                          tooltip: 'Usuń autokorektę',
+                          tooltip: _t.pick(
+                            'Usuń autokorektę',
+                            'Delete auto-correction',
+                          ),
                           icon: const Icon(Icons.delete_outline),
                           onPressed: () => _deleteAutoCorrection(rule),
                         ),
@@ -2443,10 +2796,13 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         minLines: null,
         maxLines: null,
         textAlignVertical: TextAlignVertical.top,
-        decoration: const InputDecoration(
-          labelText: 'Kontekst sesji',
-          hintText: 'Np. URL, temat spotkania albo krótka notatka',
-          border: OutlineInputBorder(),
+        decoration: InputDecoration(
+          labelText: _t.pick('Kontekst sesji', 'Session context'),
+          hintText: _t.pick(
+            'Np. URL, temat spotkania albo krótka notatka',
+            'E.g. URL, meeting topic, or a short note',
+          ),
+          border: const OutlineInputBorder(),
           alignLabelWithHint: true,
         ),
       ),
@@ -2466,6 +2822,14 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
     return '$date $time';
   }
 
+  void _toggleExplanationCollapsed(int id) {
+    setState(() {
+      if (!_collapsedExplanationIds.add(id)) {
+        _collapsedExplanationIds.remove(id);
+      }
+    });
+  }
+
   Widget _buildResizablePanels() {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2483,6 +2847,7 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 segments: visibleTranscript.segments,
                 isTruncated: visibleTranscript.isTruncated,
                 autoScroll: _isListening,
+                strings: _t,
                 onTokenTap: _handleTokenTap,
                 onCopy: _copyTranscription,
                 onClear: _clearVisibleTranscription,
@@ -2494,9 +2859,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 behavior: HitTestBehavior.opaque,
                 onHorizontalDragUpdate: (details) {
                   setState(() {
-                    _transcriptionPanelFraction =
-                        (_transcriptionPanelFraction + details.delta.dx / availableWidth)
-                            .clamp(0.25, 0.8);
+                    _transcriptionPanelFraction = (_transcriptionPanelFraction +
+                            details.delta.dx / availableWidth)
+                        .clamp(0.25, 0.8);
                   });
                 },
                 onHorizontalDragEnd: (_) => _saveCurrentPreferences(),
@@ -2516,7 +2881,13 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
               width: explanationWidth,
               child: ExplanationHistoryView(
                 explanations: _explanations,
-                onClear: () => setState(_explanations.clear),
+                collapsedIds: _collapsedExplanationIds,
+                strings: _t,
+                onToggleCollapsed: _toggleExplanationCollapsed,
+                onClear: () => setState(() {
+                  _explanations.clear();
+                  _collapsedExplanationIds.clear();
+                }),
               ),
             ),
           ],
@@ -2539,12 +2910,15 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
         ),
         actions: [
           IconButton(
-            tooltip: 'Ustawienia OpenAI',
+            tooltip: _t.pick('Ustawienia', 'Settings'),
             icon: const Icon(Icons.settings),
             onPressed: _showSettingsDialog,
           ),
           IconButton(
-            tooltip: 'Otwórz folder transkrypcji i wyjaśnień',
+            tooltip: _t.pick(
+              'Otwórz folder transkrypcji i wyjaśnień',
+              'Open transcript and explanation folder',
+            ),
             icon: const Icon(Icons.folder_open),
             onPressed: _openSessionsFolder,
           ),
@@ -2558,9 +2932,13 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
               children: [
                 DropdownButton<String>(
                   value: _selectedLocaleId,
-                  items: const [
-                    DropdownMenuItem(value: 'en_US', child: Text('English')),
-                    DropdownMenuItem(value: 'pl_PL', child: Text('Polski')),
+                  items: [
+                    const DropdownMenuItem(
+                        value: 'en_US', child: Text('English')),
+                    DropdownMenuItem(
+                      value: 'pl_PL',
+                      child: Text(_t.pick('Polski', 'Polish')),
+                    ),
                   ],
                   onChanged: _isListening
                       ? null
@@ -2572,29 +2950,48 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                 const SizedBox(width: 16),
                 DropdownButton<String>(
                   value: _selectedSource,
-                  items: const [
-                    DropdownMenuItem(value: 'microphone', child: Text('Mikrofon')),
-                    DropdownMenuItem(value: 'system', child: Text('System audio')),
-                    DropdownMenuItem(value: 'both', child: Text('Mikrofon + system audio')),
+                  items: [
+                    DropdownMenuItem(
+                      value: 'microphone',
+                      child: Text(_t.pick('Mikrofon', 'Microphone')),
+                    ),
+                    const DropdownMenuItem(
+                        value: 'system', child: Text('System audio')),
+                    DropdownMenuItem(
+                      value: 'both',
+                      child: Text(
+                        _t.pick(
+                          'Mikrofon + system audio',
+                          'Microphone + system audio',
+                        ),
+                      ),
+                    ),
                   ],
                   onChanged: _isListening
                       ? null
                       : (value) {
-                          setState(() => _selectedSource = value ?? 'microphone');
+                          setState(
+                              () => _selectedSource = value ?? 'microphone');
                           _saveCurrentPreferences();
                         },
                 ),
                 const SizedBox(width: 16),
                 DropdownButton<String>(
                   value: _selectedAnswerLanguage,
-                  items: const [
-                    DropdownMenuItem(value: 'pl', child: Text('Wyjaśnienia: PL')),
-                    DropdownMenuItem(value: 'en', child: Text('Explanations: EN')),
+                  items: [
+                    DropdownMenuItem(
+                      value: 'pl',
+                      child:
+                          Text(_t.pick('Wyjaśnienia: PL', 'Explanations: PL')),
+                    ),
+                    const DropdownMenuItem(
+                        value: 'en', child: Text('Explanations: EN')),
                   ],
                   onChanged: _isListening
                       ? null
                       : (value) {
-                          setState(() => _selectedAnswerLanguage = value ?? 'pl');
+                          setState(
+                              () => _selectedAnswerLanguage = value ?? 'pl');
                           _saveCurrentPreferences();
                         },
                 ),
@@ -2606,9 +3003,9 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     textInputAction: TextInputAction.done,
-                    decoration: const InputDecoration(
-                      labelText: 'Znaki',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: _t.pick('Znaki', 'Chars'),
+                      border: const OutlineInputBorder(),
                       isDense: true,
                     ),
                     onChanged: _updateExplanationLength,
@@ -2623,11 +3020,12 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Kopiuj komunikat',
+                  tooltip: _t.pick('Kopiuj komunikat', 'Copy message'),
                   icon: const Icon(Icons.content_copy),
-                  onPressed: (_statusMessage == null || _statusMessage!.trim().isEmpty)
-                      ? null
-                      : _copyStatusMessage,
+                  onPressed:
+                      (_statusMessage == null || _statusMessage!.trim().isEmpty)
+                          ? null
+                          : _copyStatusMessage,
                 ),
               ],
             ),
@@ -2665,7 +3063,8 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
                         onHorizontalDragEnd: (_) => _saveCurrentPreferences(),
                         child: Container(
                           width: dividerWidth,
-                          color: Theme.of(context).dividerColor.withOpacity(0.45),
+                          color:
+                              Theme.of(context).dividerColor.withOpacity(0.45),
                           child: Center(
                             child: Container(
                               width: 2,
@@ -2692,12 +3091,12 @@ Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
           ),
         ],
       ),
-   floatingActionButton: FloatingActionButton(
-     onPressed: (_speechEnabled && !_isListening)
-         ? _startListening
-         : _stopListening,
-     child: Icon(_isListening ? Icons.stop : Icons.mic),
-   ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: (_speechEnabled && !_isListening)
+            ? _startListening
+            : _stopListening,
+        child: Icon(_isListening ? Icons.stop : Icons.mic),
+      ),
     );
   }
 }

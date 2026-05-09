@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../l10n/app_strings.dart';
+import '../models/explanation_citation.dart';
 
 class ExplanationItem {
   final int id;
@@ -7,6 +11,7 @@ class ExplanationItem {
   final String? explanation;
   final String? error;
   final bool isLoading;
+  final List<ExplanationCitation> citations;
 
   const ExplanationItem({
     required this.id,
@@ -14,12 +19,14 @@ class ExplanationItem {
     this.explanation,
     this.error,
     this.isLoading = false,
+    this.citations = const [],
   });
 
   ExplanationItem copyWith({
     String? explanation,
     String? error,
     bool? isLoading,
+    List<ExplanationCitation>? citations,
   }) {
     return ExplanationItem(
       id: id,
@@ -27,17 +34,24 @@ class ExplanationItem {
       explanation: explanation ?? this.explanation,
       error: error ?? this.error,
       isLoading: isLoading ?? this.isLoading,
+      citations: citations ?? this.citations,
     );
   }
 }
 
 class ExplanationHistoryView extends StatelessWidget {
   final List<ExplanationItem> explanations;
+  final Set<int> collapsedIds;
+  final AppStrings strings;
+  final ValueChanged<int> onToggleCollapsed;
   final VoidCallback onClear;
 
   const ExplanationHistoryView({
     super.key,
     required this.explanations,
+    required this.collapsedIds,
+    required this.strings,
+    required this.onToggleCollapsed,
     required this.onClear,
   });
 
@@ -57,12 +71,13 @@ class ExplanationHistoryView extends StatelessWidget {
             child: Row(
               children: [
                 Text(
-                  'Wyjaśnienia',
+                  strings.pick('Wyjaśnienia', 'Explanations'),
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const Spacer(),
                 IconButton(
-                  tooltip: 'Wyczyść wyjaśnienia',
+                  tooltip:
+                      strings.pick('Wyczyść wyjaśnienia', 'Clear explanations'),
                   icon: const Icon(Icons.delete_outline),
                   onPressed: explanations.isEmpty ? null : onClear,
                 ),
@@ -73,7 +88,10 @@ class ExplanationHistoryView extends StatelessWidget {
             child: explanations.isEmpty
                 ? Center(
                     child: Text(
-                      'Kliknij słowo w transkrypcji.',
+                      strings.pick(
+                        'Kliknij słowo w transkrypcji.',
+                        'Click a word in the transcript.',
+                      ),
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                   )
@@ -81,7 +99,12 @@ class ExplanationHistoryView extends StatelessWidget {
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                     itemBuilder: (context, index) {
                       final item = explanations[index];
-                      return _ExplanationCard(item: item);
+                      return _ExplanationCard(
+                        item: item,
+                        strings: strings,
+                        isCollapsed: collapsedIds.contains(item.id),
+                        onToggleCollapsed: () => onToggleCollapsed(item.id),
+                      );
                     },
                     separatorBuilder: (_, __) => const SizedBox(height: 8),
                     itemCount: explanations.length,
@@ -95,12 +118,21 @@ class ExplanationHistoryView extends StatelessWidget {
 
 class _ExplanationCard extends StatelessWidget {
   final ExplanationItem item;
+  final AppStrings strings;
+  final bool isCollapsed;
+  final VoidCallback onToggleCollapsed;
 
-  const _ExplanationCard({required this.item});
+  const _ExplanationCard({
+    required this.item,
+    required this.strings,
+    required this.isCollapsed,
+    required this.onToggleCollapsed,
+  });
 
   @override
   Widget build(BuildContext context) {
     final body = item.error ?? item.explanation ?? '';
+    final clipboardText = _clipboardText(body);
 
     return Card(
       margin: EdgeInsets.zero,
@@ -123,28 +155,45 @@ class _ExplanationCard extends StatelessWidget {
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                else
+                else ...[
                   IconButton(
-                    tooltip: 'Kopiuj wyjaśnienie',
+                    tooltip:
+                        strings.pick('Kopiuj wyjaśnienie', 'Copy explanation'),
                     icon: const Icon(Icons.content_copy),
                     onPressed: body.isEmpty
                         ? null
                         : () {
                             Clipboard.setData(
-                              ClipboardData(text: '${item.term}\n\n$body'),
+                              ClipboardData(text: clipboardText),
                             );
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Wyjaśnienie skopiowane'),
+                              SnackBar(
+                                content: Text(
+                                  strings.pick(
+                                    'Wyjaśnienie skopiowane',
+                                    'Explanation copied',
+                                  ),
+                                ),
                               ),
                             );
                           },
                   ),
+                  if (body.isNotEmpty)
+                    IconButton(
+                      tooltip: isCollapsed
+                          ? strings.pick('Rozwiń', 'Expand')
+                          : strings.pick('Zwiń', 'Collapse'),
+                      icon: Icon(
+                        isCollapsed ? Icons.expand_more : Icons.expand_less,
+                      ),
+                      onPressed: onToggleCollapsed,
+                    ),
+                ],
               ],
             ),
-            if (body.isNotEmpty) ...[
+            if (body.isNotEmpty && !isCollapsed) ...[
               const SizedBox(height: 8),
-              Text(
+              SelectableText(
                 body,
                 style: item.error == null
                     ? Theme.of(context).textTheme.bodyMedium
@@ -153,10 +202,52 @@ class _ExplanationCard extends StatelessWidget {
                         .bodyMedium
                         ?.copyWith(color: Theme.of(context).colorScheme.error),
               ),
+              if (item.citations.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  strings.pick('Źródła', 'Sources'),
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: item.citations
+                      .map(
+                        (citation) => ActionChip(
+                          avatar: const Icon(Icons.open_in_new, size: 16),
+                          label: Text(_citationLabel(citation)),
+                          onPressed: () => Process.run('open', [citation.url]),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
             ],
           ],
         ),
       ),
     );
+  }
+
+  String _clipboardText(String body) {
+    final citationText = item.citations.map((citation) {
+      final title =
+          citation.title.trim().isEmpty ? citation.url : citation.title;
+      return '$title\n${citation.url}';
+    }).join('\n\n');
+
+    return [
+      item.term,
+      if (body.isNotEmpty) body,
+      if (citationText.isNotEmpty)
+        '${strings.pick('Źródła', 'Sources')}:\n$citationText',
+    ].join('\n\n');
+  }
+
+  String _citationLabel(ExplanationCitation citation) {
+    if (citation.title.trim().isNotEmpty) return citation.title.trim();
+    final uri = Uri.tryParse(citation.url);
+    return uri?.host.isNotEmpty == true ? uri!.host : citation.url;
   }
 }

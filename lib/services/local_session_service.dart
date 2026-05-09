@@ -1,15 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../models/explanation_citation.dart';
+
 class LocalExplanationRecord {
   final String term;
   final String? explanation;
   final String? error;
+  final List<ExplanationCitation> citations;
 
   const LocalExplanationRecord({
     required this.term,
     this.explanation,
     this.error,
+    this.citations = const [],
   });
 }
 
@@ -134,7 +138,8 @@ class LocalSessionService {
     final now = DateTime.now();
     final root = await _sessionsRoot();
     final dayDirectory = Directory('${root.path}/${_formatDate(now)}');
-    final sessionDirectory = Directory('${dayDirectory.path}/${_formatTime(now)}');
+    final sessionDirectory =
+        Directory('${dayDirectory.path}/${_formatTime(now)}');
 
     await sessionDirectory.create(recursive: true);
     _currentSessionDirectory = sessionDirectory;
@@ -186,6 +191,7 @@ class LocalSessionService {
     required String term,
     String? explanation,
     String? error,
+    List<ExplanationCitation> citations = const [],
   }) async {
     final directory = _currentSessionDirectory;
     if (directory == null) return;
@@ -193,11 +199,13 @@ class LocalSessionService {
     final file = File('${directory.path}/explanations.jsonl');
     await file.writeAsString(
       '${jsonEncode({
-        'createdAt': DateTime.now().toIso8601String(),
-        'term': term,
-        'explanation': explanation,
-        'error': error,
-      })}\n',
+            'createdAt': DateTime.now().toIso8601String(),
+            'term': term,
+            'explanation': explanation,
+            'error': error,
+            'citations':
+                citations.map((citation) => citation.toJson()).toList(),
+          })}\n',
       mode: FileMode.append,
     );
   }
@@ -209,13 +217,17 @@ class LocalSessionService {
   }
 
   Future<LocalSessionSnapshot> loadSession(Directory sessionDirectory) async {
-    final transcriptionFile = File('${sessionDirectory.path}/transcription.txt');
+    final transcriptionFile =
+        File('${sessionDirectory.path}/transcription.txt');
     final contextFile = File('${sessionDirectory.path}/context.txt');
-    final explanationsFile = File('${sessionDirectory.path}/explanations.jsonl');
+    final explanationsFile =
+        File('${sessionDirectory.path}/explanations.jsonl');
     final metadata = await _readMetadata(sessionDirectory);
-    final transcription =
-        await transcriptionFile.exists() ? await transcriptionFile.readAsString() : '';
-    final sessionContext = await contextFile.exists() ? await contextFile.readAsString() : '';
+    final transcription = await transcriptionFile.exists()
+        ? await transcriptionFile.readAsString()
+        : '';
+    final sessionContext =
+        await contextFile.exists() ? await contextFile.readAsString() : '';
     final explanations = await _readExplanations(explanationsFile);
 
     _currentSessionDirectory = sessionDirectory;
@@ -250,8 +262,10 @@ class LocalSessionService {
       sessionDirectories.sort((a, b) => b.path.compareTo(a.path));
 
       for (final sessionDirectory in sessionDirectories) {
-        final transcriptionFile = File('${sessionDirectory.path}/transcription.txt');
-        final explanationsFile = File('${sessionDirectory.path}/explanations.jsonl');
+        final transcriptionFile =
+            File('${sessionDirectory.path}/transcription.txt');
+        final explanationsFile =
+            File('${sessionDirectory.path}/explanations.jsonl');
         final metadata = await _readMetadata(sessionDirectory);
         final transcription = await transcriptionFile.exists()
             ? await transcriptionFile.readAsString()
@@ -265,7 +279,8 @@ class LocalSessionService {
               startedAt: _startedAtFromSession(sessionDirectory, metadata),
               project: _projectFromMetadata(metadata),
               customTitle: _customTitleFromMetadata(metadata),
-              title: _titleForSession(sessionDirectory, metadata, transcription),
+              title:
+                  _titleForSession(sessionDirectory, metadata, transcription),
               preview: _previewForSession(transcription, explanations),
             ),
           );
@@ -277,7 +292,8 @@ class LocalSessionService {
     return summaries;
   }
 
-  Future<List<String>> loadProjects({List<LocalSessionSummary>? sessionSummaries}) async {
+  Future<List<String>> loadProjects(
+      {List<LocalSessionSummary>? sessionSummaries}) async {
     final projects = <String>{defaultProject};
     final summaries = sessionSummaries ?? await loadSessionSummaries();
     for (final summary in summaries) {
@@ -305,7 +321,8 @@ class LocalSessionService {
     return [defaultProject, ...sorted];
   }
 
-  Future<List<LocalAutoCorrectionRule>> loadAutoCorrections(String project) async {
+  Future<List<LocalAutoCorrectionRule>> loadAutoCorrections(
+      String project) async {
     await _migrateLegacyAutoCorrectionsIfNeeded();
 
     try {
@@ -357,13 +374,17 @@ class LocalSessionService {
     await setSessionProject(directory, project);
   }
 
-  Future<void> setSessionProject(Directory sessionDirectory, String project) async {
+  Future<void> setSessionProject(
+      Directory sessionDirectory, String project) async {
     final metadata = await _readMetadata(sessionDirectory);
-    metadata['project'] = project.trim().isEmpty ? defaultProject : project.trim();
+    metadata['project'] =
+        project.trim().isEmpty ? defaultProject : project.trim();
     final file = File('${sessionDirectory.path}/metadata.json');
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(metadata));
+    await file
+        .writeAsString(const JsonEncoder.withIndent('  ').convert(metadata));
 
-    final projects = (await loadProjects()).toSet()..add(metadata['project'] as String);
+    final projects = (await loadProjects()).toSet()
+      ..add(metadata['project'] as String);
     await _writeProjects(projects.toList());
   }
 
@@ -377,12 +398,14 @@ class LocalSessionService {
     }
 
     final file = File('${sessionDirectory.path}/metadata.json');
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(metadata));
+    await file
+        .writeAsString(const JsonEncoder.withIndent('  ').convert(metadata));
   }
 
   Future<Directory> moveSessionToTrash(Directory sessionDirectory) async {
     final trashDirectory = await _trashDirectory();
-    final destination = await _trashDestinationFor(sessionDirectory, trashDirectory);
+    final destination =
+        await _trashDestinationFor(sessionDirectory, trashDirectory);
     final movedDirectory = await sessionDirectory.rename(destination.path);
 
     if (_currentSessionDirectory?.path == sessionDirectory.path) {
@@ -411,7 +434,8 @@ class LocalSessionService {
     );
 
     final autoCorrectionsFile = await _autoCorrectionsByProjectFile();
-    final autoCorrections = await _readAutoCorrectionsByProject(autoCorrectionsFile);
+    final autoCorrections =
+        await _readAutoCorrectionsByProject(autoCorrectionsFile);
     final projectAutoCorrections = autoCorrections.remove(normalizedProject);
     if (projectAutoCorrections != null) {
       await File('${destination.path}/autocorrections.json').writeAsString(
@@ -434,7 +458,9 @@ class LocalSessionService {
 
       final pathParts = sessionDirectory.path.split(Platform.pathSeparator);
       final sessionName = pathParts.isNotEmpty ? pathParts.last : 'session';
-      final dayName = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : 'unknown-date';
+      final dayName = pathParts.length >= 2
+          ? pathParts[pathParts.length - 2]
+          : 'unknown-date';
       final dayDestination = Directory('${sessionsDestination.path}/$dayName');
       await dayDestination.create(recursive: true);
       final sessionDestination = await _uniqueDirectory(
@@ -466,6 +492,7 @@ class LocalSessionService {
             term: decoded['term'] as String? ?? '',
             explanation: decoded['explanation'] as String?,
             error: decoded['error'] as String?,
+            citations: _readCitations(decoded['citations']),
           ),
         );
       } catch (_) {
@@ -474,6 +501,14 @@ class LocalSessionService {
     }
 
     return records.where((record) => record.term.trim().isNotEmpty).toList();
+  }
+
+  List<ExplanationCitation> _readCitations(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .map(ExplanationCitation.fromJson)
+        .whereType<ExplanationCitation>()
+        .toList();
   }
 
   Future<Directory> _sessionsRoot() async {
@@ -525,7 +560,8 @@ class LocalSessionService {
     await _writeProjects(projects.toList());
   }
 
-  Future<List<LocalAutoCorrectionRule>> _readAutoCorrectionRules(File file) async {
+  Future<List<LocalAutoCorrectionRule>> _readAutoCorrectionRules(
+      File file) async {
     try {
       final decoded = jsonDecode(await file.readAsString());
       if (decoded is! List) return const [];
@@ -543,7 +579,9 @@ class LocalSessionService {
 
     try {
       final decoded = jsonDecode(await file.readAsString());
-      if (decoded is Map<String, dynamic>) return Map<String, dynamic>.from(decoded);
+      if (decoded is Map<String, dynamic>) {
+        return Map<String, dynamic>.from(decoded);
+      }
     } catch (_) {
       // Keep the app usable if the project dictionary is malformed.
     }
@@ -565,7 +603,8 @@ class LocalSessionService {
   ) async {
     final parts = sessionDirectory.path.split(Platform.pathSeparator);
     final sessionName = parts.isNotEmpty ? parts.last : 'session';
-    final dayName = parts.length >= 2 ? parts[parts.length - 2] : 'unknown-date';
+    final dayName =
+        parts.length >= 2 ? parts[parts.length - 2] : 'unknown-date';
     final baseName = 'XplainR-$dayName-$sessionName';
 
     var candidate = Directory('${trashDirectory.path}/$baseName');
@@ -587,7 +626,8 @@ class LocalSessionService {
         .replaceAll(':', '-')
         .replaceAll('.', '-');
     return _uniqueDirectory(
-      Directory('${trashDirectory.path}/XplainR-project-$safeProject-$timestamp'),
+      Directory(
+          '${trashDirectory.path}/XplainR-project-$safeProject-$timestamp'),
     );
   }
 
@@ -638,7 +678,8 @@ class LocalSessionService {
       ..sort();
     normalized.remove(defaultProject);
     await (await _projectsFile()).writeAsString(
-      const JsonEncoder.withIndent('  ').convert([defaultProject, ...normalized]),
+      const JsonEncoder.withIndent('  ')
+          .convert([defaultProject, ...normalized]),
     );
   }
 
@@ -661,7 +702,9 @@ class LocalSessionService {
   }
 
   String _projectName(String? project) {
-    return project == null || project.trim().isEmpty ? defaultProject : project.trim();
+    return project == null || project.trim().isEmpty
+        ? defaultProject
+        : project.trim();
   }
 
   String? _customTitleFromMetadata(Map<String, dynamic> metadata) {
@@ -710,7 +753,9 @@ class LocalSessionService {
         .join(' ');
 
     if (firstWords.isEmpty) return '$date $time';
-    return firstWords.length > 52 ? '${firstWords.substring(0, 52)}...' : firstWords;
+    return firstWords.length > 52
+        ? '${firstWords.substring(0, 52)}...'
+        : firstWords;
   }
 
   String _previewForSession(

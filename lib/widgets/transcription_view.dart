@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_strings.dart';
 
 class TranscriptToken {
   final String text;
@@ -26,6 +27,7 @@ class TranscriptionView extends StatefulWidget {
   final List<TranscriptDisplaySegment> segments;
   final bool isTruncated;
   final bool autoScroll;
+  final AppStrings strings;
   final void Function(TranscriptToken token) onTokenTap;
   final VoidCallback onCopy;
   final VoidCallback onClear;
@@ -35,6 +37,7 @@ class TranscriptionView extends StatefulWidget {
     required this.segments,
     required this.isTruncated,
     required this.autoScroll,
+    required this.strings,
     required this.onTokenTap,
     required this.onCopy,
     required this.onClear,
@@ -47,12 +50,14 @@ class TranscriptionView extends StatefulWidget {
 class _TranscriptionViewState extends State<TranscriptionView> {
   final ScrollController _scrollController = ScrollController();
 
-  bool get _hasText => widget.segments.any((segment) => segment.text.trim().isNotEmpty);
+  bool get _hasText =>
+      widget.segments.any((segment) => segment.text.trim().isNotEmpty);
 
   @override
   void didUpdateWidget(covariant TranscriptionView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.autoScroll && _segmentsChanged(oldWidget.segments, widget.segments)) {
+    if (widget.autoScroll &&
+        _segmentsChanged(oldWidget.segments, widget.segments)) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     }
   }
@@ -113,27 +118,34 @@ class _TranscriptionViewState extends State<TranscriptionView> {
           child: Row(
             children: [
               Text(
-                'Transkrypcja',
+                widget.strings.pick('Transkrypcja', 'Transcript'),
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               if (widget.isTruncated) ...[
                 const SizedBox(width: 8),
                 Tooltip(
-                  message: 'Widok pokazuje końcówkę sesji. Pełny tekst jest zapisany lokalnie.',
+                  message: widget.strings.pick(
+                    'Widok pokazuje końcówkę sesji. Pełny tekst jest zapisany lokalnie.',
+                    'This view shows the tail of the session. The full text is saved locally.',
+                  ),
                   child: Text(
-                    'ostatni fragment',
+                    widget.strings.pick('ostatni fragment', 'recent excerpt'),
                     style: Theme.of(context).textTheme.labelMedium,
                   ),
                 ),
               ],
               const Spacer(),
               IconButton(
-                tooltip: 'Kopiuj transkrypcję',
+                tooltip: widget.strings
+                    .pick('Kopiuj transkrypcję', 'Copy transcript'),
                 icon: const Icon(Icons.content_copy),
                 onPressed: _hasText ? widget.onCopy : null,
               ),
               IconButton(
-                tooltip: 'Wyczyść transkrypcję z widoku',
+                tooltip: widget.strings.pick(
+                  'Wyczyść transkrypcję z widoku',
+                  'Clear transcript from view',
+                ),
                 icon: const Icon(Icons.delete_outline),
                 onPressed: _hasText ? widget.onClear : null,
               ),
@@ -152,7 +164,10 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Text(
-                      'Starsza część transkrypcji jest ukryta w widoku, ale zapisana na dysku.',
+                      widget.strings.pick(
+                        'Starsza część transkrypcji jest ukryta w widoku, ale zapisana na dysku.',
+                        'Older transcript text is hidden in this view but saved on disk.',
+                      ),
                       style: Theme.of(context).textTheme.labelMedium,
                     ),
                   );
@@ -173,10 +188,12 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                             borderRadius: BorderRadius.circular(4),
                             onTap: () => widget.onTokenTap(token),
                             child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 1),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 1),
                               child: Text(
                                 token.text,
-                                style: const TextStyle(fontSize: 16, height: 1.35),
+                                style:
+                                    const TextStyle(fontSize: 16, height: 1.35),
                               ),
                             ),
                           ),
