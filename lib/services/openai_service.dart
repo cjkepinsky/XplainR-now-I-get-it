@@ -1,8 +1,26 @@
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../models/explanation_citation.dart';
+
+const defaultExplanationModel = 'gpt-4.1-mini';
+const defaultLanguageDetectionModel = 'whisper-1';
+const explanationModelOptions = <String>[
+  defaultExplanationModel,
+  'gpt-4.1',
+];
+const _fastOpenAiModel = defaultExplanationModel;
+const _questionOpenAiModel = 'gpt-4.1';
+
+String normalizeExplanationModel(String? model) {
+  final trimmed = model?.trim();
+  if (trimmed != null && explanationModelOptions.contains(trimmed)) {
+    return trimmed;
+  }
+  return defaultExplanationModel;
+}
 
 class OpenAiAnswer {
   final String text;
@@ -11,6 +29,16 @@ class OpenAiAnswer {
   const OpenAiAnswer({
     required this.text,
     this.citations = const [],
+  });
+}
+
+class DetectedAudioLanguage {
+  final String languageCode;
+  final String text;
+
+  const DetectedAudioLanguage({
+    required this.languageCode,
+    required this.text,
   });
 }
 
@@ -26,6 +54,10 @@ class OpenAiSettings {
   final double sidebarSessionFraction;
   final double sidebarAutoCorrectionFraction;
   final int explanationCharacterTarget;
+  final String explanationModel;
+  final bool transcriptTranslationEnabled;
+  final String transcriptTranslationLanguage;
+  final bool languageAutoDetectionEnabled;
 
   const OpenAiSettings({
     this.apiKey,
@@ -39,6 +71,10 @@ class OpenAiSettings {
     this.sidebarSessionFraction = 0.48,
     this.sidebarAutoCorrectionFraction = 0.56,
     this.explanationCharacterTarget = 300,
+    this.explanationModel = defaultExplanationModel,
+    this.transcriptTranslationEnabled = false,
+    this.transcriptTranslationLanguage = 'pl',
+    this.languageAutoDetectionEnabled = false,
   });
 
   OpenAiSettings copyWith({
@@ -53,6 +89,10 @@ class OpenAiSettings {
     double? sidebarSessionFraction,
     double? sidebarAutoCorrectionFraction,
     int? explanationCharacterTarget,
+    String? explanationModel,
+    bool? transcriptTranslationEnabled,
+    String? transcriptTranslationLanguage,
+    bool? languageAutoDetectionEnabled,
   }) {
     return OpenAiSettings(
       apiKey: apiKey ?? this.apiKey,
@@ -70,6 +110,14 @@ class OpenAiSettings {
           sidebarAutoCorrectionFraction ?? this.sidebarAutoCorrectionFraction,
       explanationCharacterTarget:
           explanationCharacterTarget ?? this.explanationCharacterTarget,
+      explanationModel:
+          normalizeExplanationModel(explanationModel ?? this.explanationModel),
+      transcriptTranslationEnabled:
+          transcriptTranslationEnabled ?? this.transcriptTranslationEnabled,
+      transcriptTranslationLanguage:
+          transcriptTranslationLanguage ?? this.transcriptTranslationLanguage,
+      languageAutoDetectionEnabled:
+          languageAutoDetectionEnabled ?? this.languageAutoDetectionEnabled,
     );
   }
 }
@@ -119,6 +167,14 @@ Future<OpenAiSettings> _getSavedOpenAiSettings() async {
           (data['sidebarAutoCorrectionFraction'] as num?)?.toDouble() ?? 0.56,
       explanationCharacterTarget:
           (data['explanationCharacterTarget'] as num?)?.toInt() ?? 300,
+      explanationModel:
+          normalizeExplanationModel(data['explanationModel'] as String?),
+      transcriptTranslationEnabled:
+          data['transcriptTranslationEnabled'] as bool? ?? false,
+      transcriptTranslationLanguage:
+          data['transcriptTranslationLanguage'] as String? ?? 'pl',
+      languageAutoDetectionEnabled:
+          data['languageAutoDetectionEnabled'] as bool? ?? false,
     );
   }
 
@@ -154,6 +210,10 @@ Future<void> saveOpenAiSettings({
   double? sidebarSessionFraction,
   double? sidebarAutoCorrectionFraction,
   int? explanationCharacterTarget,
+  String? explanationModel,
+  bool? transcriptTranslationEnabled,
+  String? transcriptTranslationLanguage,
+  bool? languageAutoDetectionEnabled,
 }) async {
   final currentSettings = await getOpenAiSettings();
   final file = await _settingsFileForWrite();
@@ -175,6 +235,14 @@ Future<void> saveOpenAiSettings({
           currentSettings.sidebarAutoCorrectionFraction,
       'explanationCharacterTarget': explanationCharacterTarget ??
           currentSettings.explanationCharacterTarget,
+      'explanationModel': normalizeExplanationModel(
+          explanationModel ?? currentSettings.explanationModel),
+      'transcriptTranslationEnabled': transcriptTranslationEnabled ??
+          currentSettings.transcriptTranslationEnabled,
+      'transcriptTranslationLanguage': transcriptTranslationLanguage ??
+          currentSettings.transcriptTranslationLanguage,
+      'languageAutoDetectionEnabled': languageAutoDetectionEnabled ??
+          currentSettings.languageAutoDetectionEnabled,
     }),
   );
 }
@@ -189,6 +257,10 @@ Future<void> saveAppPreferences({
   required double sidebarSessionFraction,
   required double sidebarAutoCorrectionFraction,
   required int explanationCharacterTarget,
+  required String explanationModel,
+  required bool transcriptTranslationEnabled,
+  required String transcriptTranslationLanguage,
+  required bool languageAutoDetectionEnabled,
 }) async {
   final settings = await getOpenAiSettings();
   await saveOpenAiSettings(
@@ -203,12 +275,246 @@ Future<void> saveAppPreferences({
     sidebarSessionFraction: sidebarSessionFraction,
     sidebarAutoCorrectionFraction: sidebarAutoCorrectionFraction,
     explanationCharacterTarget: explanationCharacterTarget,
+    explanationModel: explanationModel,
+    transcriptTranslationEnabled: transcriptTranslationEnabled,
+    transcriptTranslationLanguage: transcriptTranslationLanguage,
+    languageAutoDetectionEnabled: languageAutoDetectionEnabled,
+  );
+}
+
+String? _normalizeDetectedLanguage(dynamic value) {
+  final raw = value?.toString().trim().toLowerCase();
+  if (raw == null || raw.isEmpty) return null;
+
+  if (raw == 'pl' || raw == 'polish' || raw == 'polski') {
+    return 'pl';
+  }
+  if (raw == 'en' || raw == 'eng' || raw == 'english') {
+    return 'en';
+  }
+  return null;
+}
+
+Future<DetectedAudioLanguage?> detectSpeechLanguageFromAudio(
+  Uint8List wavBytes, {
+  String interfaceLanguage = 'pl',
+}) async {
+  final apiKey = await getOpenAiApiKey();
+  if (apiKey == null) {
+    throw Exception(
+      interfaceLanguage == 'en'
+          ? 'OpenAI API key is not configured.'
+          : 'Brak skonfigurowanego OpenAI API key.',
+    );
+  }
+  if (wavBytes.isEmpty) return null;
+
+  final request = http.MultipartRequest(
+    'POST',
+    Uri.parse('https://api.openai.com/v1/audio/transcriptions'),
+  )
+    ..headers['Authorization'] = 'Bearer $apiKey'
+    ..fields['model'] = defaultLanguageDetectionModel
+    ..fields['response_format'] = 'verbose_json'
+    ..files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        wavBytes,
+        filename: 'xplainr-language-probe.wav',
+      ),
+    );
+
+  final streamedResponse =
+      await request.send().timeout(const Duration(seconds: 25));
+  final response = await http.Response.fromStream(streamedResponse);
+
+  if (response.statusCode != 200) {
+    final responseBody = response.body.length > 500
+        ? '${response.body.substring(0, 500)}...'
+        : response.body;
+    throw Exception(
+      interfaceLanguage == 'en'
+          ? 'Could not detect speech language: ${response.statusCode} $responseBody'
+          : 'Nie udało się wykryć języka mowy: ${response.statusCode} $responseBody',
+    );
+  }
+
+  final data = jsonDecode(response.body) as Map<String, dynamic>;
+  final languageCode = _normalizeDetectedLanguage(data['language']);
+  if (languageCode == null) return null;
+
+  return DetectedAudioLanguage(
+    languageCode: languageCode,
+    text: (data['text'] as String? ?? '').trim(),
   );
 }
 
 int _maxTokensForCharacterTarget(int targetCharacters) {
   final safeTarget = targetCharacters.clamp(120, 2500).toInt();
   return (safeTarget / 3.0).ceil() + 80;
+}
+
+int _maxTokensForQuestionTarget(int targetCharacters) {
+  final safeTarget = targetCharacters.clamp(120, 6000).toInt();
+  return (safeTarget / 3.0).ceil() + 120;
+}
+
+int _maxTokensForTranslation(String text) {
+  final estimatedCharacters = (text.length * 1.35).ceil();
+  return (estimatedCharacters / 3.2).ceil().clamp(120, 2500).toInt();
+}
+
+int _effectiveQuestionCharacterTarget(String question, int requestedTarget) {
+  if (_looksLikeExhaustiveTranscriptQuestion(question)) {
+    return requestedTarget < 3500 ? 3500 : requestedTarget;
+  }
+  return requestedTarget;
+}
+
+bool _looksLikeExhaustiveTranscriptQuestion(String question) {
+  final normalized = question.toLowerCase();
+  const exhaustiveMarkers = [
+    'wszystkie',
+    'wszystko',
+    'każde',
+    'kazde',
+    'pełn',
+    'peln',
+    'szczegół',
+    'szczegol',
+    'wylistuj',
+    'wypisz',
+    'lista',
+    'list',
+    'all',
+    'every',
+    'complete',
+    'detailed',
+  ];
+  const transcriptExtractionMarkers = [
+    'wniosk',
+    'pytan',
+    'pytań',
+    'decyz',
+    'ustal',
+    'zadani',
+    'action item',
+    'question',
+    'conclusion',
+    'decision',
+    'takeaway',
+  ];
+
+  return exhaustiveMarkers.any(normalized.contains) &&
+      transcriptExtractionMarkers.any(normalized.contains);
+}
+
+String _numberedTranscriptContext(String transcriptContext) {
+  final segments = transcriptContext
+      .split(RegExp(r'\n{2,}'))
+      .map((segment) => segment.trim())
+      .where((segment) => segment.isNotEmpty)
+      .toList();
+  if (segments.isEmpty) return '';
+
+  return [
+    for (var index = 0; index < segments.length; index += 1)
+      '[T${(index + 1).toString().padLeft(3, '0')}] ${segments[index]}',
+  ].join('\n\n');
+}
+
+String _strictTranscriptQaInstructions({
+  required String instructionLanguage,
+  required int characterTarget,
+  required bool useWebSearch,
+}) {
+  final webRule = useWebSearch
+      ? 'For current external facts found through web search, cite web sources. For facts about the meeting itself, still require transcript evidence.'
+      : 'Do not use outside knowledge or web facts.';
+
+  return 'You are a strict evidence-based analyst of live meeting transcripts. '
+      'The numbered transcript fragments are the only source of truth for what happened in the meeting. '
+      'Never invent questions, conclusions, decisions, names, dates, numbers, technologies, or action items. '
+      'Existing explanations and previous Q&A are secondary notes only; use them only to understand terminology, never as evidence that something happened. '
+      'Every factual bullet or listed item must include at least one transcript fragment id, such as [T012], and a very short quote or paraphrase from that fragment. '
+      'If a claim cannot be tied to a transcript fragment id, omit it. '
+      'For requests like "list all questions", include only explicit questions or clear requests from speakers. '
+      'For requests like "list all conclusions/takeaways", include only conclusions, decisions, or takeaways directly stated or tightly entailed by a cited fragment; do not infer broad themes. '
+      'If the transcript does not contain enough evidence, say that directly instead of guessing. '
+      '$webRule '
+      'Format the answer as scannable sections. Each section must use exactly this structure: '
+      'a Markdown H3 heading line in the form "### <1-4 word heading>", then one concise paragraph, then a separate evidence line. '
+      'For Polish answers use "Dowód: [T012] \\"short quote or paraphrase\\"". For English answers use "Evidence: [T012] \\"short quote or paraphrase\\"". '
+      'Put the evidence line directly below the paragraph, not inside the same paragraph. '
+      'Do not use bullet points unless the user explicitly asks for a checklist. Prefer several short headed sections over one long list. '
+      'Answer in $instructionLanguage. Aim for about $characterTarget characters, but prefer an incomplete evidence-backed answer over a complete-looking invented answer. '
+      'No preamble, no generic summary section, no “if you want” follow-up.';
+}
+
+Future<String> translateTranscriptSegment(
+  String segment, {
+  required String targetLanguage,
+  required String sourceLanguage,
+  required String sessionContext,
+  String interfaceLanguage = 'pl',
+}) async {
+  final apiKey = await getOpenAiApiKey();
+  if (apiKey == null) {
+    throw Exception(
+      interfaceLanguage == 'en'
+          ? 'OpenAI API key is not configured.'
+          : 'Brak skonfigurowanego OpenAI API key.',
+    );
+  }
+
+  final normalizedSegment = segment.trim();
+  if (normalizedSegment.isEmpty) return '';
+
+  final targetName = targetLanguage == 'en' ? 'English' : 'Polish';
+  final configuredSourceName = sourceLanguage == 'pl' ? 'Polish' : 'English';
+
+  final response = await http.post(
+    Uri.parse('https://api.openai.com/v1/chat/completions'),
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $apiKey',
+    },
+    body: jsonEncode({
+      'model': _fastOpenAiModel,
+      'temperature': 0.1,
+      'max_tokens': _maxTokensForTranslation(normalizedSegment),
+      'messages': [
+        {
+          'role': 'system',
+          'content': 'You translate live meeting transcript fragments into $targetName. '
+              'The configured speech recognition language is $configuredSourceName, but the fragment may contain Polish, English, or mixed technical speech, so detect the source language automatically. '
+              'Preserve meaning, speaker intent, technical terms, code identifiers, product names, framework names, file names, commands, and acronyms. '
+              'If the fragment is already in $targetName, return a cleaned-up same-language version without changing the meaning. '
+              'Do not add explanations, commentary, summaries, markdown, or quotes. '
+              'Return only the translated transcript fragment.',
+        },
+        {
+          'role': 'user',
+          'content': 'Session context, if useful:\n"$sessionContext"\n\n'
+              'Transcript fragment:\n"$normalizedSegment"',
+        }
+      ],
+    }),
+  );
+
+  if (response.statusCode == 200) {
+    final data = jsonDecode(response.body);
+    return (data['choices'][0]['message']['content'] as String? ?? '').trim();
+  }
+
+  final responseBody = response.body.length > 500
+      ? '${response.body.substring(0, 500)}...'
+      : response.body;
+  throw Exception(
+    interfaceLanguage == 'en'
+        ? 'Could not translate transcript: ${response.statusCode} $responseBody'
+        : 'Nie udało się przetłumaczyć transkrypcji: ${response.statusCode} $responseBody',
+  );
 }
 
 Future<String> getWordExplanation(
@@ -219,6 +525,7 @@ Future<String> getWordExplanation(
   String answerLanguage = 'pl',
   String interfaceLanguage = 'pl',
   int characterTarget = 300,
+  String explanationModel = defaultExplanationModel,
 }) async {
   final apiKey = await getOpenAiApiKey();
   if (apiKey == null) {
@@ -239,7 +546,7 @@ Future<String> getWordExplanation(
       'Authorization': 'Bearer $apiKey',
     },
     body: jsonEncode({
-      'model': 'gpt-4.1-mini',
+      'model': normalizeExplanationModel(explanationModel),
       'temperature': 0.2,
       'max_tokens': _maxTokensForCharacterTarget(characterTarget),
       'messages': [
@@ -298,18 +605,22 @@ Future<OpenAiAnswer> askQuestionAboutTranscript(
 
   final languageName = answerLanguage == 'en' ? 'English' : 'Polish';
   final instructionLanguage = answerLanguage == 'en' ? 'English' : 'Polish';
+  final effectiveCharacterTarget =
+      _effectiveQuestionCharacterTarget(question, characterTarget);
+  final numberedTranscriptContext =
+      _numberedTranscriptContext(transcriptContext);
 
   if (useWebSearch) {
     return _askQuestionWithWebSearch(
       apiKey: apiKey,
       question: question,
-      transcriptContext: transcriptContext,
+      transcriptContext: numberedTranscriptContext,
       explanationsContext: explanationsContext,
       sessionContext: sessionContext,
       languageName: languageName,
       instructionLanguage: instructionLanguage,
       interfaceLanguage: interfaceLanguage,
-      characterTarget: characterTarget,
+      characterTarget: effectiveCharacterTarget,
     );
   }
 
@@ -320,26 +631,24 @@ Future<OpenAiAnswer> askQuestionAboutTranscript(
       'Authorization': 'Bearer $apiKey',
     },
     body: jsonEncode({
-      'model': 'gpt-4.1-mini',
-      'temperature': 0.2,
-      'max_tokens': _maxTokensForCharacterTarget(characterTarget),
+      'model': _questionOpenAiModel,
+      'temperature': 0,
+      'max_tokens': _maxTokensForQuestionTarget(effectiveCharacterTarget),
       'messages': [
         {
           'role': 'system',
-          'content': 'You are a context-aware explainer for live meeting transcripts. '
-              'Answer questions using the transcript and existing explanations as the source of truth. '
-              'If the answer is not supported by the provided context, say that clearly and mention what is missing. '
-              'Do not explain grammar, inflection, etymology, or generic meanings unless they are essential. '
-              'Answer in $instructionLanguage. Aim for about $characterTarget characters. '
-              'It can be a little shorter or longer if the context requires it. '
-              'No preamble, no summary section, no “if you want” follow-up.',
+          'content': _strictTranscriptQaInstructions(
+            instructionLanguage: instructionLanguage,
+            characterTarget: effectiveCharacterTarget,
+            useWebSearch: false,
+          ),
         },
         {
           'role': 'user',
           'content': 'Question: "$question"\n\n'
               'User-provided session context, such as topic, URL, or notes:\n"$sessionContext"\n\n'
-              'Transcript context:\n"$transcriptContext"\n\n'
-              'Existing explanations and previous Q&A:\n"$explanationsContext"\n\n'
+              'Numbered transcript fragments, primary evidence:\n$numberedTranscriptContext\n\n'
+              'Secondary explanations and previous Q&A, not evidence by themselves:\n"$explanationsContext"\n\n'
               'Answer the question in $languageName.',
         }
       ],
@@ -379,7 +688,7 @@ Future<OpenAiAnswer> _askQuestionWithWebSearch({
       'Authorization': 'Bearer $apiKey',
     },
     body: jsonEncode({
-      'model': 'gpt-4.1-mini',
+      'model': _questionOpenAiModel,
       'tools': [
         {
           'type': 'web_search',
@@ -387,17 +696,17 @@ Future<OpenAiAnswer> _askQuestionWithWebSearch({
         }
       ],
       'tool_choice': 'required',
-      'max_output_tokens': _maxTokensForCharacterTarget(characterTarget),
-      'instructions': 'You are a context-aware research assistant for live meeting transcripts. '
-          'Use web search for current prices, availability, recent facts, URLs, products, companies, laws, releases, or anything time-sensitive. '
-          'Use the transcript and existing explanations as context, but do not expose private transcript details unless they are needed to answer. '
-          'Answer in $instructionLanguage. Aim for about $characterTarget characters. '
-          'Include concise source references for facts found online. '
-          'No preamble, no summary section, no “if you want” follow-up.',
+      'temperature': 0,
+      'max_output_tokens': _maxTokensForQuestionTarget(characterTarget),
+      'instructions': _strictTranscriptQaInstructions(
+        instructionLanguage: instructionLanguage,
+        characterTarget: characterTarget,
+        useWebSearch: true,
+      ),
       'input': 'Question: "$question"\n\n'
           'User-provided session context, such as topic, URL, or notes:\n"$sessionContext"\n\n'
-          'Transcript context:\n"$transcriptContext"\n\n'
-          'Existing explanations and previous Q&A:\n"$explanationsContext"\n\n'
+          'Numbered transcript fragments, primary meeting evidence:\n$transcriptContext\n\n'
+          'Secondary explanations and previous Q&A, not evidence by themselves:\n"$explanationsContext"\n\n'
           'Answer the question in $languageName.',
     }),
   );

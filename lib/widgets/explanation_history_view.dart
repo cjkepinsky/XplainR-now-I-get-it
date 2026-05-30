@@ -7,6 +7,7 @@ import '../models/explanation_citation.dart';
 
 class ExplanationItem {
   final int id;
+  final String stableId;
   final String term;
   final String? explanation;
   final String? error;
@@ -15,6 +16,7 @@ class ExplanationItem {
 
   const ExplanationItem({
     required this.id,
+    required this.stableId,
     required this.term,
     this.explanation,
     this.error,
@@ -30,6 +32,7 @@ class ExplanationItem {
   }) {
     return ExplanationItem(
       id: id,
+      stableId: stableId,
       term: term,
       explanation: explanation ?? this.explanation,
       error: error ?? this.error,
@@ -41,9 +44,9 @@ class ExplanationItem {
 
 class ExplanationHistoryView extends StatelessWidget {
   final List<ExplanationItem> explanations;
-  final Set<int> collapsedIds;
+  final Set<String> collapsedIds;
   final AppStrings strings;
-  final ValueChanged<int> onToggleCollapsed;
+  final ValueChanged<String> onToggleCollapsed;
   final VoidCallback onClear;
 
   const ExplanationHistoryView({
@@ -85,30 +88,33 @@ class ExplanationHistoryView extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: explanations.isEmpty
-                ? Center(
-                    child: Text(
-                      strings.pick(
-                        'Kliknij słowo w transkrypcji.',
-                        'Click a word in the transcript.',
+            child: SelectionArea(
+              child: explanations.isEmpty
+                  ? Center(
+                      child: Text(
+                        strings.pick(
+                          'Kliknij słowo w transkrypcji.',
+                          'Click a word in the transcript.',
+                        ),
+                        style: Theme.of(context).textTheme.bodyMedium,
                       ),
-                      style: Theme.of(context).textTheme.bodyMedium,
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                      itemBuilder: (context, index) {
+                        final item = explanations[index];
+                        return _ExplanationCard(
+                          item: item,
+                          strings: strings,
+                          isCollapsed: collapsedIds.contains(item.stableId),
+                          onToggleCollapsed: () =>
+                              onToggleCollapsed(item.stableId),
+                        );
+                      },
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemCount: explanations.length,
                     ),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                    itemBuilder: (context, index) {
-                      final item = explanations[index];
-                      return _ExplanationCard(
-                        item: item,
-                        strings: strings,
-                        isCollapsed: collapsedIds.contains(item.id),
-                        onToggleCollapsed: () => onToggleCollapsed(item.id),
-                      );
-                    },
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemCount: explanations.length,
-                  ),
+            ),
           ),
         ],
       ),
@@ -133,20 +139,33 @@ class _ExplanationCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final body = item.error ?? item.explanation ?? '';
     final clipboardText = _clipboardText(body);
+    final isQuestion = _isQuestionItem;
 
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.fromLTRB(12, isQuestion ? 14 : 12, 12, 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (isQuestion) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.help_outline,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: Text(
                     item.term,
-                    style: Theme.of(context).textTheme.titleSmall,
+                    style: _titleStyle(context, isQuestion),
                   ),
                 ),
                 if (item.isLoading)
@@ -192,15 +211,10 @@ class _ExplanationCard extends StatelessWidget {
               ],
             ),
             if (body.isNotEmpty && !isCollapsed) ...[
-              const SizedBox(height: 8),
-              SelectableText(
+              SizedBox(height: isQuestion ? 12 : 8),
+              _FormattedExplanationBody(
                 body,
-                style: item.error == null
-                    ? Theme.of(context).textTheme.bodyMedium
-                    : Theme.of(context)
-                        .textTheme
-                        .bodyMedium
-                        ?.copyWith(color: Theme.of(context).colorScheme.error),
+                isError: item.error != null,
               ),
               if (item.citations.isNotEmpty) ...[
                 const SizedBox(height: 12),
@@ -230,6 +244,23 @@ class _ExplanationCard extends StatelessWidget {
     );
   }
 
+  bool get _isQuestionItem {
+    final normalized = item.term.trim().toLowerCase();
+    return normalized.startsWith('pytanie:') ||
+        normalized.startsWith('question:');
+  }
+
+  TextStyle? _titleStyle(BuildContext context, bool isQuestion) {
+    final theme = Theme.of(context).textTheme;
+    if (!isQuestion) return theme.titleSmall;
+
+    return theme.titleMedium?.copyWith(
+      fontWeight: FontWeight.w700,
+      height: 1.25,
+      color: Theme.of(context).colorScheme.onSurface,
+    );
+  }
+
   String _clipboardText(String body) {
     final citationText = item.citations.map((citation) {
       final title =
@@ -249,5 +280,103 @@ class _ExplanationCard extends StatelessWidget {
     if (citation.title.trim().isNotEmpty) return citation.title.trim();
     final uri = Uri.tryParse(citation.url);
     return uri?.host.isNotEmpty == true ? uri!.host : citation.url;
+  }
+}
+
+class _FormattedExplanationBody extends StatelessWidget {
+  final String text;
+  final bool isError;
+
+  const _FormattedExplanationBody(
+    this.text, {
+    required this.isError,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final baseStyle = Theme.of(context).textTheme.bodyMedium;
+    final effectiveBaseStyle = isError
+        ? baseStyle?.copyWith(color: Theme.of(context).colorScheme.error)
+        : baseStyle;
+    final lines = text.split('\n');
+    final children = <Widget>[];
+
+    for (final rawLine in lines) {
+      final line = rawLine.trimRight();
+      if (line.trim().isEmpty) {
+        if (children.isNotEmpty) {
+          children.add(const SizedBox(height: 8));
+        }
+        continue;
+      }
+
+      if (_isHeadingLine(line)) {
+        children.add(
+          Padding(
+            padding: EdgeInsets.only(top: children.isEmpty ? 0 : 10, bottom: 4),
+            child: Text(
+              _headingText(line),
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    height: 1.25,
+                  ),
+            ),
+          ),
+        );
+        continue;
+      }
+
+      if (_isEvidenceLine(line)) {
+        children.add(
+          Padding(
+            padding: const EdgeInsets.only(top: 3, bottom: 4),
+            child: Text(
+              line,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    height: 1.3,
+                    fontStyle: FontStyle.italic,
+                  ),
+            ),
+          ),
+        );
+        continue;
+      }
+
+      children.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(
+            line,
+            style: effectiveBaseStyle?.copyWith(height: 1.35),
+          ),
+        ),
+      );
+    }
+
+    if (children.isEmpty) {
+      return Text(text, style: effectiveBaseStyle);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  bool _isHeadingLine(String line) {
+    return line.trimLeft().startsWith('### ');
+  }
+
+  String _headingText(String line) {
+    return line.trimLeft().replaceFirst(RegExp(r'^#+\s*'), '').trim();
+  }
+
+  bool _isEvidenceLine(String line) {
+    final normalized = line.trimLeft().toLowerCase();
+    return normalized.startsWith('dowód:') ||
+        normalized.startsWith('dowod:') ||
+        normalized.startsWith('evidence:') ||
+        RegExp(r'^\[t\d{3}\]').hasMatch(normalized);
   }
 }

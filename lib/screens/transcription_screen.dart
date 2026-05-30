@@ -137,7 +137,7 @@ class _SessionAction {
 class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final List<String> _transcriptionSegments = [];
   final List<ExplanationItem> _explanations = [];
-  final Set<int> _collapsedExplanationIds = {};
+  final Set<String> _collapsedExplanationIds = {};
   final List<LocalSessionSummary> _sessionSummaries = [];
   final List<LocalAutoCorrectionRule> _autoCorrectionRules = [];
   final List<String> _projects = [LocalSessionService.defaultProject];
@@ -145,9 +145,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final List<_PartialCorrection> _systemAudioPartialCorrections = [];
   final TextEditingController _transcriptionController =
       TextEditingController();
+  final TextEditingController _translationController = TextEditingController();
   final TextEditingController _questionController = TextEditingController();
   final TextEditingController _sessionContextController =
       TextEditingController();
+  final FocusNode _questionFocusNode = FocusNode();
   final TextEditingController _explanationLengthController =
       TextEditingController(text: '300');
   String _partialMicrophoneTranscription = '';
@@ -157,10 +159,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _speechEnabled = false;
   bool _isSystemAudioListening = false;
   bool _isAskingQuestion = false;
+  bool _isStartingListening = false;
+  bool _isStoppingListening = false;
+  bool _isSwitchingTranscriptionLanguage = false;
   bool _forceWebResearch = false;
+  bool _transcriptTranslationEnabled = false;
+  bool _languageAutoDetectionEnabled = false;
+  bool _isLanguageDetectionProbeRunning = false;
   String _selectedLocaleId = 'en_US';
   String _selectedAnswerLanguage = 'pl';
   String _selectedInterfaceLanguage = 'pl';
+  String _selectedTranscriptTranslationLanguage = 'pl';
+  String _selectedExplanationModel = defaultExplanationModel;
   String _selectedSource = 'microphone';
   String _selectedProject = LocalSessionService.defaultProject;
   String _currentSessionProject = LocalSessionService.defaultProject;
@@ -168,12 +178,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String? _statusMessage;
   StreamSubscription<dynamic>? _systemAudioSubscription;
   Timer? _signalLevelTimer;
+  Timer? _languageDetectionTimer;
   Timer? _transcriptionSaveDebounce;
+  Timer? _translationSaveDebounce;
   Timer? _preferenceSaveDebounce;
   Timer? _partialRenderDebounce;
+  Timer? _livePartialCommitTimer;
   Timer? _sessionLibraryRefreshDebounce;
   Timer? _sessionContextSaveDebounce;
   bool _suppressTranscriptSnapshot = false;
+  bool _suppressTranslationSnapshot = false;
   bool _suppressSessionContextSave = false;
   int _nextExplanationId = 1;
   int _explanationCharacterTarget = 300;
@@ -187,15 +201,30 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   double _systemAudioSignalLevel = 0;
   String _pendingPartialMicrophoneTranscription = '';
   String _pendingPartialSystemAudioTranscription = '';
+  String _latestRawMicrophoneTranscription = '';
+  String _latestRawSystemAudioTranscription = '';
+  String _committedRawMicrophoneTranscription = '';
+  String _committedRawSystemAudioTranscription = '';
   RegExp? _autoCorrectionMatcher;
   Map<String, String> _autoCorrectionReplacements = {};
+  Future<void> _translationQueue = Future.value();
+  String? _languageDetectionCandidateLocaleId;
+  int _languageDetectionCandidateCount = 0;
+  DateTime? _lastAutoLanguageSwitchAt;
+  String? _lastLanguageDetectionError;
 
   static const _systemAudioControl =
       MethodChannel('xplainr/system_audio_control');
   static const _systemAudioEvents = EventChannel('xplainr/system_audio_events');
   static const _visibleTranscriptWordLimit = 1500;
+  static const _livePartialCommitInterval = Duration(seconds: 5);
+  static const _livePartialCommitMinWords = 6;
+  static const _languageDetectionInterval = Duration(seconds: 10);
+  static const _languageDetectionCooldown = Duration(seconds: 30);
+  static const _languageDetectionRequiredStableProbes = 1;
 
   String get _committedTranscription => _transcriptionController.text;
+  String get _committedTranslation => _translationController.text;
   String get _sessionContext => _sessionContextController.text.trim();
   AppStrings get _t => AppStrings.forLanguage(_selectedInterfaceLanguage);
 
@@ -204,6 +233,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       return _t.pick('Bez projektu', 'No project');
     }
     return project;
+  }
+
+  String _newExplanationStableId(int runtimeId) {
+    return '${DateTime.now().microsecondsSinceEpoch}-$runtimeId';
   }
 
   String get _transcription {
@@ -217,6 +250,36 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   ({List<TranscriptDisplaySegment> segments, bool isTruncated})
       get _visibleTranscript {
     final fullText = _transcription;
+    if (fullText.trim().isEmpty) {
+      return (segments: const <TranscriptDisplaySegment>[], isTruncated: false);
+    }
+
+    final tailStart =
+        _tailStartForLastWords(fullText, _visibleTranscriptWordLimit);
+    if (tailStart == 0) {
+      return (
+        segments: _displaySegmentsFromText(fullText, 0),
+        isTruncated: false,
+      );
+    }
+
+    var start = tailStart;
+    while (start > 0 && fullText[start - 1] != '\n') {
+      start -= 1;
+    }
+    while (start < fullText.length && fullText[start].trim().isEmpty) {
+      start += 1;
+    }
+
+    return (
+      segments: _displaySegmentsFromText(fullText.substring(start), start),
+      isTruncated: true,
+    );
+  }
+
+  ({List<TranscriptDisplaySegment> segments, bool isTruncated})
+      get _visibleTranslation {
+    final fullText = _committedTranslation;
     if (fullText.trim().isEmpty) {
       return (segments: const <TranscriptDisplaySegment>[], isTruncated: false);
     }
@@ -286,6 +349,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     super.initState();
     debugPrint('Initializing speech...');
     _transcriptionController.addListener(_scheduleTranscriptSnapshotSave);
+    _translationController.addListener(_scheduleTranslationSnapshotSave);
     _sessionContextController.addListener(_scheduleSessionContextSave);
     _loadSavedPreferences();
     _refreshSessionLibrary();
@@ -303,6 +367,17 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       const Duration(milliseconds: 700),
       () => _sessionService
           .writeTranscriptSnapshot(_transcriptionController.text),
+    );
+  }
+
+  void _scheduleTranslationSnapshotSave() {
+    if (_suppressTranslationSnapshot) return;
+
+    _translationSaveDebounce?.cancel();
+    _translationSaveDebounce = Timer(
+      const Duration(milliseconds: 700),
+      () =>
+          _sessionService.writeTranslationSnapshot(_translationController.text),
     );
   }
 
@@ -364,15 +439,19 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   void _applySessionSnapshot(LocalSessionSnapshot snapshot) {
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
+    _livePartialCommitTimer?.cancel();
+    _livePartialCommitTimer = null;
     _sessionContextSaveDebounce?.cancel();
     _sessionContextSaveDebounce = null;
     setState(() {
       _setVisibleTranscription(snapshot.transcription, persist: false);
+      _setVisibleTranslation(snapshot.translation, persist: false);
       _setSessionContext(snapshot.sessionContext, persist: false);
       _partialMicrophoneTranscription = '';
       _partialSystemAudioTranscription = '';
       _pendingPartialMicrophoneTranscription = '';
       _pendingPartialSystemAudioTranscription = '';
+      _resetPartialRecognitionState();
       _microphonePartialCorrections.clear();
       _systemAudioPartialCorrections.clear();
       _currentSessionPath = snapshot.directory.path;
@@ -387,6 +466,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           snapshot.explanations.reversed.map(
             (record) => ExplanationItem(
               id: _nextExplanationId++,
+              stableId: record.id,
               term: record.term,
               explanation: record.explanation,
               error: record.error,
@@ -394,7 +474,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
             ),
           ),
         );
-      _collapsedExplanationIds.clear();
+      _collapsedExplanationIds
+        ..clear()
+        ..addAll(snapshot.collapsedExplanationIds);
       _statusMessage = _t.pick(
         'Załadowano sesję: ${snapshot.directory.path}',
         'Loaded session: ${snapshot.directory.path}',
@@ -408,17 +490,21 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   }) {
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
+    _livePartialCommitTimer?.cancel();
+    _livePartialCommitTimer = null;
     _sessionContextSaveDebounce?.cancel();
     _sessionContextSaveDebounce = null;
     _sessionService.clearCurrentSession();
 
     setState(() {
       _setVisibleTranscription('', persist: false);
+      _setVisibleTranslation('', persist: false);
       _setSessionContext('', persist: false);
       _partialMicrophoneTranscription = '';
       _partialSystemAudioTranscription = '';
       _pendingPartialMicrophoneTranscription = '';
       _pendingPartialSystemAudioTranscription = '';
+      _resetPartialRecognitionState();
       _transcriptionSegments.clear();
       _explanations.clear();
       _collapsedExplanationIds.clear();
@@ -450,6 +536,27 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         .map((segment) => segment.trim())
         .where((segment) => segment.isNotEmpty)
         .toList();
+  }
+
+  int? _segmentIndexForCommittedRange(TextRange range) {
+    if (!range.isValid) return null;
+
+    final segments = _displaySegmentsFromText(_committedTranscription, 0);
+    for (var index = 0; index < segments.length; index += 1) {
+      final segment = segments[index];
+      final start = segment.startOffset;
+      final end = start + segment.text.length;
+      if (range.start >= start && range.start <= end) {
+        return index;
+      }
+    }
+    return null;
+  }
+
+  String? _segmentTextAtIndex(String transcription, int index) {
+    final segments = _displaySegmentsFromText(transcription, 0);
+    if (index < 0 || index >= segments.length) return null;
+    return segments[index].text.trim();
   }
 
   void _startSignalLevelTimer() {
@@ -489,6 +596,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _selectedLocaleId = settings.speechLanguage;
       _selectedAnswerLanguage = settings.answerLanguage;
       _selectedSource = settings.audioSource;
+      _selectedExplanationModel = settings.explanationModel;
+      _transcriptTranslationEnabled = settings.transcriptTranslationEnabled;
+      _selectedTranscriptTranslationLanguage =
+          settings.transcriptTranslationLanguage;
+      _languageAutoDetectionEnabled = settings.languageAutoDetectionEnabled;
       _transcriptionPanelFraction =
           settings.transcriptionPanelFraction.clamp(0.25, 0.8);
       _sidebarWidth = settings.sidebarWidth.clamp(220, 520).toDouble();
@@ -541,20 +653,184 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     debugPrint('Recognized words: ${result.recognizedWords}');
   }
 
-  void _startListening() async {
-    await _ensureActiveSession();
+  Future<void> _handleTranscriptionLanguageChanged(String? value) async {
+    final nextLocaleId = value ?? _selectedLocaleId;
+    if (nextLocaleId == _selectedLocaleId || _isAudioTransitioning) return;
 
+    if (!_isListening) {
+      setState(() => _selectedLocaleId = nextLocaleId);
+      await _saveCurrentPreferences();
+      return;
+    }
+
+    await _switchTranscriptionLanguage(nextLocaleId);
+  }
+
+  Future<void> _switchTranscriptionLanguage(String nextLocaleId) async {
+    final previousLocaleId = _selectedLocaleId;
+    final nextLanguage = _transcriptionLanguageName(nextLocaleId);
+
+    setState(() {
+      _isSwitchingTranscriptionLanguage = true;
+      _statusMessage = _t.pick(
+        'Przełączanie języka transkrypcji na $nextLanguage...',
+        'Switching transcription language to $nextLanguage...',
+      );
+    });
+
+    final shouldResumeLanguageDetection = _languageAutoDetectionEnabled;
+
+    await _sessionService.appendEvent(
+      type: 'transcription_language_switch_started',
+      details: {
+        'from': previousLocaleId,
+        'to': nextLocaleId,
+        'audioSource': _selectedSource,
+      },
+    );
+
+    try {
+      await _stopLanguageDetection(resetState: false);
+      await _stopSelectedAudioSources(
+        updateStatus: false,
+        refreshLibrary: false,
+      );
+      if (!mounted) return;
+
+      setState(() {
+        _selectedLocaleId = nextLocaleId;
+        _resetPartialRecognitionState();
+      });
+      await _saveCurrentPreferences();
+
+      final marker = _languageSwitchMarker(nextLocaleId);
+      setState(() {
+        _appendTranscriptSegment(marker);
+        _statusMessage = _t.pick(
+          'Język transkrypcji: $nextLanguage. Wznawiam nasłuchiwanie...',
+          'Transcription language: $nextLanguage. Resuming listening...',
+        );
+      });
+      await _sessionService.appendEvent(
+        type: 'transcription_language_changed',
+        details: {
+          'from': previousLocaleId,
+          'to': nextLocaleId,
+          'audioSource': _selectedSource,
+          'marker': marker,
+        },
+      );
+
+      await _startSelectedAudioSources(updateStatus: false);
+      if (shouldResumeLanguageDetection) {
+        await _startLanguageDetectionIfNeeded();
+      }
+      if (!mounted) return;
+
+      await _sessionService.appendEvent(
+        type: 'transcription_language_switch_completed',
+        details: {
+          'from': previousLocaleId,
+          'to': nextLocaleId,
+          'audioSource': _selectedSource,
+        },
+      );
+      setState(() {
+        _statusMessage = _t.pick(
+          'Język transkrypcji: $nextLanguage. Nasłuchiwanie wznowione.',
+          'Transcription language: $nextLanguage. Listening resumed.',
+        );
+      });
+      await _refreshSessionLibraryImmediately();
+    } catch (error) {
+      await _sessionService.appendEvent(
+        type: 'transcription_language_switch_failed',
+        details: {
+          'from': previousLocaleId,
+          'to': nextLocaleId,
+          'audioSource': _selectedSource,
+          'error': error.toString(),
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Nie udało się przełączyć języka transkrypcji: $error',
+          'Could not switch transcription language: $error',
+        );
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _isSwitchingTranscriptionLanguage = false);
+      }
+    }
+  }
+
+  String _languageSwitchMarker(String localeId) {
+    final now = DateTime.now();
+    final hour = now.hour.toString().padLeft(2, '0');
+    final minute = now.minute.toString().padLeft(2, '0');
+    final second = now.second.toString().padLeft(2, '0');
+    final language = _transcriptionLanguageName(localeId);
+    return _t.pick(
+      '[$hour:$minute:$second] Zmieniono język transkrypcji na: $language',
+      '[$hour:$minute:$second] Transcription language changed to: $language',
+    );
+  }
+
+  String _transcriptionLanguageName(String localeId) {
+    return localeId.toLowerCase().startsWith('pl')
+        ? _t.pick('Polski', 'Polish')
+        : 'English';
+  }
+
+  Future<void> _startListening() async {
+    if (_isAudioTransitioning) return;
+
+    setState(() {
+      _isStartingListening = true;
+      _statusMessage = _t.pick(
+        'Uruchamianie transkrypcji...',
+        'Starting transcription...',
+      );
+    });
+
+    try {
+      await _ensureActiveSession();
+      await _sessionService.appendEvent(
+        type: 'transcription_start_requested',
+        details: {
+          'speechLanguage': _selectedLocaleId,
+          'audioSource': _selectedSource,
+        },
+      );
+      await _startSelectedAudioSources();
+      await _startLanguageDetectionIfNeeded();
+      await _sessionService.appendEvent(
+        type: 'transcription_started',
+        details: {
+          'speechLanguage': _selectedLocaleId,
+          'audioSource': _selectedSource,
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isStartingListening = false);
+      }
+    }
+  }
+
+  Future<void> _startSelectedAudioSources({bool updateStatus = true}) async {
     if (_selectedSource == 'both') {
-      await _startCombinedListening();
+      await _startCombinedListening(updateStatus: updateStatus);
       return;
     }
-
     if (_selectedSource == 'system') {
-      await _startSystemAudioListening();
+      await _startSystemAudioListening(updateStatus: updateStatus);
       return;
     }
 
-    await _startMicrophoneListening();
+    await _startMicrophoneListening(updateStatus: updateStatus);
   }
 
   Future<void> _ensureActiveSession() async {
@@ -576,20 +852,27 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       speechLanguage: _selectedLocaleId,
       answerLanguage: _selectedAnswerLanguage,
       audioSource: _selectedSource,
+      transcriptTranslationEnabled: _transcriptTranslationEnabled,
+      transcriptTranslationLanguage: _selectedTranscriptTranslationLanguage,
+      languageAutoDetectionEnabled: _languageAutoDetectionEnabled,
       project: project,
     );
 
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
+    _livePartialCommitTimer?.cancel();
+    _livePartialCommitTimer = null;
     _sessionContextSaveDebounce?.cancel();
     _sessionContextSaveDebounce = null;
     setState(() {
       _setVisibleTranscription('', persist: false);
+      _setVisibleTranslation('', persist: false);
       _setSessionContext('', persist: false);
       _partialMicrophoneTranscription = '';
       _partialSystemAudioTranscription = '';
       _pendingPartialMicrophoneTranscription = '';
       _pendingPartialSystemAudioTranscription = '';
+      _resetPartialRecognitionState();
       _transcriptionSegments.clear();
       _explanations.clear();
       _collapsedExplanationIds.clear();
@@ -624,21 +907,64 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     setState(() {});
   }
 
-  void _stopListening() async {
+  Future<void> _stopListening() async {
+    if (_isAudioTransitioning) return;
+
+    setState(() {
+      _isStoppingListening = true;
+      _statusMessage = _t.pick(
+        'Zatrzymywanie transkrypcji...',
+        'Stopping transcription...',
+      );
+    });
+
+    try {
+      await _stopLanguageDetection();
+      await _stopSelectedAudioSources();
+      await _sessionService.appendEvent(
+        type: 'transcription_stopped',
+        details: {
+          'speechLanguage': _selectedLocaleId,
+          'audioSource': _selectedSource,
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isStoppingListening = false);
+      }
+    }
+  }
+
+  Future<void> _stopSelectedAudioSources({
+    bool updateStatus = true,
+    bool refreshLibrary = true,
+  }) async {
     if (_selectedSource == 'both') {
-      await _stopCombinedListening();
+      await _stopCombinedListening(
+        updateStatus: updateStatus,
+        refreshLibrary: refreshLibrary,
+      );
       return;
     }
 
     if (_selectedSource == 'system') {
-      await _stopSystemAudioListening();
+      await _stopSystemAudioListening(
+        updateStatus: updateStatus,
+        refreshLibrary: refreshLibrary,
+      );
       return;
     }
 
-    await _stopMicrophoneListening();
+    await _stopMicrophoneListening(
+      updateStatus: updateStatus,
+      refreshLibrary: refreshLibrary,
+    );
   }
 
-  Future<void> _stopMicrophoneListening({bool updateStatus = true}) async {
+  Future<void> _stopMicrophoneListening({
+    bool updateStatus = true,
+    bool refreshLibrary = true,
+  }) async {
     debugPrint('Stop microphone listening');
     await _speechToText.stop();
     setState(() {
@@ -652,25 +978,29 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _statusMessage = _t.pick('Zatrzymano mikrofon.', 'Microphone stopped.');
       }
     });
-    if (updateStatus) {
+    if (updateStatus && refreshLibrary) {
       await _refreshSessionLibraryImmediately();
     }
   }
 
-  Future<void> _startCombinedListening() async {
+  Future<void> _startCombinedListening({bool updateStatus = true}) async {
     debugPrint('Start combined listening');
-    setState(() => _statusMessage = _t.pick(
-          'Uruchamianie mikrofonu i audio systemowego...',
-          'Starting microphone and system audio...',
-        ));
+    if (updateStatus) {
+      setState(() => _statusMessage = _t.pick(
+            'Uruchamianie mikrofonu i audio systemowego...',
+            'Starting microphone and system audio...',
+          ));
+    }
 
     try {
       await _startSystemAudioListening(updateStatus: false);
       await _startMicrophoneListening(updateStatus: false);
-      setState(() => _statusMessage = _t.pick(
-            'Nasłuchiwanie mikrofonu i audio systemowego...',
-            'Listening to microphone and system audio...',
-          ));
+      if (updateStatus) {
+        setState(() => _statusMessage = _t.pick(
+              'Nasłuchiwanie mikrofonu i audio systemowego...',
+              'Listening to microphone and system audio...',
+            ));
+      }
     } catch (error) {
       setState(() => _statusMessage = _t.pick(
             'Nie udało się uruchomić trybu łączonego: $error',
@@ -679,15 +1009,22 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }
   }
 
-  Future<void> _stopCombinedListening() async {
+  Future<void> _stopCombinedListening({
+    bool updateStatus = true,
+    bool refreshLibrary = true,
+  }) async {
     debugPrint('Stop combined listening');
     await _stopMicrophoneListening(updateStatus: false);
     await _stopSystemAudioListening(updateStatus: false);
-    setState(() => _statusMessage = _t.pick(
-          'Zatrzymano mikrofon i audio systemowe.',
-          'Microphone and system audio stopped.',
-        ));
-    await _refreshSessionLibraryImmediately();
+    if (updateStatus) {
+      setState(() => _statusMessage = _t.pick(
+            'Zatrzymano mikrofon i audio systemowe.',
+            'Microphone and system audio stopped.',
+          ));
+    }
+    if (updateStatus && refreshLibrary) {
+      await _refreshSessionLibraryImmediately();
+    }
   }
 
   Future<void> _startSystemAudioListening({bool updateStatus = true}) async {
@@ -740,7 +1077,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }
   }
 
-  Future<void> _stopSystemAudioListening({bool updateStatus = true}) async {
+  Future<void> _stopSystemAudioListening({
+    bool updateStatus = true,
+    bool refreshLibrary = true,
+  }) async {
     debugPrint('Stop system audio listening');
     try {
       await _systemAudioControl.invokeMethod('stop');
@@ -762,7 +1102,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           );
         }
       });
-      if (updateStatus) {
+      if (updateStatus && refreshLibrary) {
         await _refreshSessionLibraryImmediately();
       }
     }
@@ -808,30 +1148,383 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _microphoneSignalRaw = normalizedLevel;
   }
 
-  bool _appendTranscriptSegment(String text) {
+  Future<void> _startLanguageDetectionIfNeeded() async {
+    if (!_languageAutoDetectionEnabled || !_isListening) return;
+
+    _languageDetectionTimer?.cancel();
+    _languageDetectionTimer = Timer.periodic(
+      _languageDetectionInterval,
+      (_) => unawaited(_runLanguageDetectionProbe()),
+    );
+
+    try {
+      if (_selectedSource == 'microphone' || _selectedSource == 'both') {
+        await _systemAudioControl.invokeMethod('startMicrophoneProbe');
+      }
+      await _sessionService.appendEvent(
+        type: 'language_auto_detection_started',
+        details: {
+          'audioSource': _selectedSource,
+          'speechLanguage': _selectedLocaleId,
+          'model': defaultLanguageDetectionModel,
+        },
+      );
+      unawaited(_runLanguageDetectionProbe());
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Nie udało się uruchomić auto-detekcji języka: $error',
+          'Could not start automatic language detection: $error',
+        );
+      });
+    }
+  }
+
+  Future<void> _stopLanguageDetection({bool resetState = true}) async {
+    _languageDetectionTimer?.cancel();
+    _languageDetectionTimer = null;
+    _isLanguageDetectionProbeRunning = false;
+
+    try {
+      await _systemAudioControl.invokeMethod('stopMicrophoneProbe');
+    } catch (_) {
+      // The probe may never have been started, which is harmless.
+    }
+
+    if (resetState) {
+      _languageDetectionCandidateLocaleId = null;
+      _languageDetectionCandidateCount = 0;
+      _lastLanguageDetectionError = null;
+    }
+  }
+
+  void _setLanguageAutoDetectionEnabled(bool enabled) {
+    setState(() {
+      _languageAutoDetectionEnabled = enabled;
+      _languageDetectionCandidateLocaleId = null;
+      _languageDetectionCandidateCount = 0;
+      _lastLanguageDetectionError = null;
+      _statusMessage = enabled
+          ? _t.pick(
+              'Auto-detekcja języka włączona dla kolejnych próbek audio.',
+              'Automatic language detection enabled for upcoming audio probes.',
+            )
+          : _t.pick(
+              'Auto-detekcja języka wyłączona.',
+              'Automatic language detection disabled.',
+            );
+    });
+
+    if (enabled && _isListening) {
+      unawaited(_startLanguageDetectionIfNeeded());
+    } else {
+      unawaited(_stopLanguageDetection());
+    }
+    _saveCurrentPreferences();
+  }
+
+  Future<void> _runLanguageDetectionProbe() async {
+    if (!_languageAutoDetectionEnabled ||
+        !_isListening ||
+        _isAudioTransitioning ||
+        _isLanguageDetectionProbeRunning) {
+      return;
+    }
+
+    final lastSwitchAt = _lastAutoLanguageSwitchAt;
+    if (lastSwitchAt != null &&
+        DateTime.now().difference(lastSwitchAt) < _languageDetectionCooldown) {
+      return;
+    }
+
+    _isLanguageDetectionProbeRunning = true;
+    try {
+      final probeAudio = await _takeLanguageProbeAudio();
+      if (probeAudio == null || probeAudio.isEmpty) return;
+
+      final detected = await detectSpeechLanguageFromAudio(
+        probeAudio,
+        interfaceLanguage: _selectedInterfaceLanguage,
+      );
+      if (!_languageAutoDetectionEnabled ||
+          !_isListening ||
+          _isAudioTransitioning) {
+        return;
+      }
+      if (detected == null) return;
+
+      _lastLanguageDetectionError = null;
+      final detectedLocaleId = _localeIdForDetectedLanguage(
+        detected.languageCode,
+      );
+      if (detectedLocaleId == null) return;
+
+      await _sessionService.appendEvent(
+        type: 'language_detection_probe',
+        details: {
+          'detectedLanguage': detected.languageCode,
+          'detectedLocaleId': detectedLocaleId,
+          'currentLocaleId': _selectedLocaleId,
+          'audioSource': _selectedSource,
+          'sampleBytes': probeAudio.length,
+          'text': detected.text,
+        },
+      );
+
+      if (detectedLocaleId == _selectedLocaleId) {
+        _languageDetectionCandidateLocaleId = null;
+        _languageDetectionCandidateCount = 0;
+        return;
+      }
+
+      if (_languageDetectionCandidateLocaleId == detectedLocaleId) {
+        _languageDetectionCandidateCount += 1;
+      } else {
+        _languageDetectionCandidateLocaleId = detectedLocaleId;
+        _languageDetectionCandidateCount = 1;
+      }
+
+      if (_languageDetectionCandidateCount <
+          _languageDetectionRequiredStableProbes) {
+        return;
+      }
+
+      final nextLanguage = _transcriptionLanguageName(detectedLocaleId);
+      if (mounted) {
+        setState(() {
+          _statusMessage = _t.pick(
+            'Auto-detekcja wykryła $nextLanguage. Przełączam transkrypcję...',
+            'Auto-detection found $nextLanguage. Switching transcription...',
+          );
+        });
+      }
+      _lastAutoLanguageSwitchAt = DateTime.now();
+      _languageDetectionCandidateLocaleId = null;
+      _languageDetectionCandidateCount = 0;
+      await _switchTranscriptionLanguage(detectedLocaleId);
+    } catch (error) {
+      final message = error.toString();
+      if (_lastLanguageDetectionError != message) {
+        _lastLanguageDetectionError = message;
+        await _sessionService.appendEvent(
+          type: 'language_detection_probe_failed',
+          details: {
+            'audioSource': _selectedSource,
+            'error': message,
+          },
+        );
+        if (mounted) {
+          setState(() {
+            _statusMessage = _t.pick(
+              'Auto-detekcja języka nie zadziałała: $error',
+              'Automatic language detection failed: $error',
+            );
+          });
+        }
+      }
+    } finally {
+      _isLanguageDetectionProbeRunning = false;
+    }
+  }
+
+  Future<Uint8List?> _takeLanguageProbeAudio() async {
+    final source = _languageProbeSource();
+    final level =
+        source == 'system' ? _systemAudioSignalLevel : _microphoneSignalLevel;
+    if (level < 8) return null;
+
+    final bytes = await _systemAudioControl.invokeMethod<Uint8List>(
+      'takeLanguageProbe',
+      {'source': source},
+    );
+    return bytes;
+  }
+
+  String _languageProbeSource() {
+    if (_selectedSource != 'both') return _selectedSource;
+    return _systemAudioSignalLevel >= _microphoneSignalLevel
+        ? 'system'
+        : 'microphone';
+  }
+
+  String? _localeIdForDetectedLanguage(String languageCode) {
+    return switch (languageCode) {
+      'pl' => 'pl_PL',
+      'en' => 'en_US',
+      _ => null,
+    };
+  }
+
+  bool _appendTranscriptSegment(String text, {_TranscriptSource? source}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return false;
 
     final committedText = _committedTranscription.trim();
+    final previousSegment =
+        _transcriptionSegments.isNotEmpty ? _transcriptionSegments.last : '';
+    final previousText = _stripTranscriptSourceLabel(previousSegment);
+    final segmentText = source == null
+        ? trimmed
+        : '${_transcriptSourceLabel(source)}: $trimmed';
     if (committedText.isNotEmpty &&
         _transcriptionSegments.isNotEmpty &&
-        _transcriptionSegments.last == trimmed) {
+        previousSegment == segmentText) {
       return false;
     }
     if (committedText.isNotEmpty &&
         _transcriptionSegments.isNotEmpty &&
-        _isLikelySameSegment(_transcriptionSegments.last, trimmed)) {
+        _isLikelySameSegment(previousText, trimmed)) {
       return false;
     }
-    if (committedText.isNotEmpty && committedText.endsWith(trimmed)) {
+    if (committedText.isNotEmpty && committedText.endsWith(segmentText)) {
       return false;
     }
 
-    _transcriptionSegments.add(trimmed);
-    _appendTranscriptToController(trimmed);
-    unawaited(_sessionService.appendTranscriptSegment(trimmed));
+    _transcriptionSegments.add(segmentText);
+    _appendTranscriptToController(segmentText);
+    unawaited(_sessionService.appendTranscriptSegment(segmentText));
+    _queueTranscriptTranslation(segmentText);
     _scheduleSessionLibraryRefresh();
     return true;
+  }
+
+  String _transcriptSourceLabel(_TranscriptSource source) {
+    return source == _TranscriptSource.microphone
+        ? _t.pick('Mikrofon', 'Microphone')
+        : 'System audio';
+  }
+
+  String _stripTranscriptSourceLabel(String text) {
+    return text
+        .replaceFirst(
+          RegExp(
+            r'^\s*(Mikrofon|Microphone|Mic|System audio)\s*:\s*',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .trim();
+  }
+
+  void _queueTranscriptTranslation(String segment) {
+    if (!_transcriptTranslationEnabled) return;
+
+    final targetLanguage = _selectedTranscriptTranslationLanguage;
+    final sourceLanguage = _speechLanguageCode;
+    final context = _sessionContext;
+    _translationQueue = _translationQueue
+        .catchError((_) {})
+        .then(
+          (_) => _translateAndAppendSegment(
+            segment,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            sessionContext: context,
+          ),
+        )
+        .catchError((error) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Błąd tłumaczenia transkrypcji: $error',
+          'Transcript translation error: $error',
+        );
+      });
+    });
+  }
+
+  String get _speechLanguageCode {
+    return _selectedLocaleId.toLowerCase().startsWith('pl') ? 'pl' : 'en';
+  }
+
+  Future<void> _translateAndAppendSegment(
+    String segment, {
+    required String sourceLanguage,
+    required String targetLanguage,
+    required String sessionContext,
+  }) async {
+    final translated = await translateTranscriptSegment(
+      segment,
+      sourceLanguage: sourceLanguage,
+      targetLanguage: targetLanguage,
+      sessionContext: sessionContext,
+      interfaceLanguage: _selectedInterfaceLanguage,
+    );
+
+    if (!mounted || translated.trim().isEmpty) return;
+
+    setState(() {
+      _appendTranslationToController(translated);
+    });
+    unawaited(_sessionService.appendTranslationSegment(translated));
+  }
+
+  void _queueTranscriptSegmentRetranslation(
+    int segmentIndex,
+    String segment,
+  ) {
+    if (!_transcriptTranslationEnabled || segment.trim().isEmpty) return;
+
+    final targetLanguage = _selectedTranscriptTranslationLanguage;
+    final sourceLanguage = _speechLanguageCode;
+    final context = _sessionContext;
+    _translationQueue = _translationQueue
+        .catchError((_) {})
+        .then(
+          (_) => _retranslateSegmentAtIndex(
+            segmentIndex,
+            segment,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            sessionContext: context,
+          ),
+        )
+        .catchError((error) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Błąd aktualizacji tłumaczenia: $error',
+          'Translation update error: $error',
+        );
+      });
+    });
+  }
+
+  Future<void> _retranslateSegmentAtIndex(
+    int segmentIndex,
+    String segment, {
+    required String sourceLanguage,
+    required String targetLanguage,
+    required String sessionContext,
+  }) async {
+    final translated = await translateTranscriptSegment(
+      segment,
+      sourceLanguage: sourceLanguage,
+      targetLanguage: targetLanguage,
+      sessionContext: sessionContext,
+      interfaceLanguage: _selectedInterfaceLanguage,
+    );
+
+    if (!mounted || translated.trim().isEmpty) return;
+
+    final translationSegments =
+        _segmentsFromTranscription(_committedTranslation);
+    if (segmentIndex >= 0 && segmentIndex < translationSegments.length) {
+      translationSegments[segmentIndex] = translated;
+    } else {
+      translationSegments.add(translated);
+    }
+    final nextTranslation = translationSegments.join('\n\n');
+
+    setState(() {
+      _setVisibleTranslation(nextTranslation, persist: false);
+      _statusMessage = _t.pick(
+        'Zaktualizowano tłumaczenie poprawionego fragmentu.',
+        'Updated the corrected fragment translation.',
+      );
+    });
+    unawaited(_sessionService.writeTranslationSnapshot(nextTranslation));
   }
 
   void _scheduleSessionLibraryRefresh() {
@@ -903,7 +1596,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
   void _updatePartialTranscript(String text,
       {required _TranscriptSource source}) {
-    final trimmed = _applyPartialCorrections(text.trim(), source);
+    final rawText = text.trim();
+    _setLatestRawTextFor(source, rawText);
+    final uncommittedText = _uncommittedRawTextFor(source, rawText);
+    final trimmed = _applyPartialCorrections(uncommittedText.trim(), source);
     if (source == _TranscriptSource.microphone) {
       _pendingPartialMicrophoneTranscription = trimmed;
     } else {
@@ -914,6 +1610,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       const Duration(milliseconds: 250),
       _flushPendingPartialTranscripts,
     );
+    _scheduleLivePartialCommit();
   }
 
   void _flushPendingPartialTranscripts() {
@@ -936,6 +1633,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
   void _commitPartialTranscript(String text,
       {required _TranscriptSource source}) {
+    _livePartialCommitTimer?.cancel();
+    _livePartialCommitTimer = null;
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
 
@@ -945,9 +1644,23 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final displayText = source == _TranscriptSource.microphone
         ? _partialMicrophoneTranscription
         : _partialSystemAudioTranscription;
-    final rawText = text.trim().isNotEmpty ? text : pendingText;
+    final latestRawText = _latestRawTextFor(source);
+    final rawText = text.trim().isNotEmpty
+        ? text.trim()
+        : latestRawText.trim().isNotEmpty
+            ? latestRawText
+            : '';
+    final uncommittedRawText = rawText.trim().isNotEmpty
+        ? _uncommittedRawTextFor(source, rawText)
+        : '';
     final trimmed = _applyPartialCorrections(
-        rawText.trim().isNotEmpty ? rawText : displayText, source);
+      uncommittedRawText.trim().isNotEmpty
+          ? uncommittedRawText
+          : pendingText.trim().isNotEmpty
+              ? pendingText
+              : displayText,
+      source,
+    );
     if (trimmed.isEmpty) {
       if (source == _TranscriptSource.microphone) {
         _partialMicrophoneTranscription = '';
@@ -956,10 +1669,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _partialSystemAudioTranscription = '';
         _pendingPartialSystemAudioTranscription = '';
       }
+      _resetPartialRecognitionStateFor(source);
       return;
     }
 
-    final appended = _appendTranscriptSegment(trimmed);
+    final appended = _appendTranscriptSegment(trimmed, source: source);
     if (!appended && _committedTranscription.trim().isEmpty) {
       return;
     }
@@ -973,6 +1687,146 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _pendingPartialSystemAudioTranscription = '';
       _systemAudioPartialCorrections.clear();
     }
+    _resetPartialRecognitionStateFor(source);
+  }
+
+  void _scheduleLivePartialCommit() {
+    if (!_transcriptTranslationEnabled || !_isListening) return;
+    _livePartialCommitTimer ??= Timer(
+      _livePartialCommitInterval,
+      _commitLivePartialTranscripts,
+    );
+  }
+
+  void _commitLivePartialTranscripts() {
+    _livePartialCommitTimer = null;
+    if (!mounted || !_transcriptTranslationEnabled || !_isListening) return;
+
+    _partialRenderDebounce?.cancel();
+    _partialRenderDebounce = null;
+
+    var committedAny = false;
+    setState(() {
+      committedAny = _commitLivePartialFor(_TranscriptSource.microphone) ||
+          _commitLivePartialFor(_TranscriptSource.systemAudio);
+    });
+
+    if (committedAny) {
+      _scheduleSessionLibraryRefresh();
+    }
+    if (_hasUncommittedPartialText) {
+      _scheduleLivePartialCommit();
+    }
+  }
+
+  bool _commitLivePartialFor(_TranscriptSource source) {
+    final rawText = _latestRawTextFor(source).trim();
+    if (rawText.isEmpty) return false;
+
+    final uncommittedText = _uncommittedRawTextFor(source, rawText).trim();
+    final correctedText =
+        _applyPartialCorrections(uncommittedText, source).trim();
+    if (correctedText.isEmpty) return false;
+
+    final wordCount = correctedText
+        .split(RegExp(r'\s+'))
+        .where((word) => word.trim().isNotEmpty)
+        .length;
+    if (wordCount < _livePartialCommitMinWords && correctedText.length < 48) {
+      return false;
+    }
+
+    final appended = _appendTranscriptSegment(correctedText, source: source);
+    _setCommittedRawTextFor(source, rawText);
+    _setPartialTextFor(source, '');
+    _partialCorrectionsFor(source).clear();
+    return appended;
+  }
+
+  bool get _hasUncommittedPartialText {
+    return _uncommittedRawTextFor(
+          _TranscriptSource.microphone,
+          _latestRawMicrophoneTranscription,
+        ).trim().isNotEmpty ||
+        _uncommittedRawTextFor(
+          _TranscriptSource.systemAudio,
+          _latestRawSystemAudioTranscription,
+        ).trim().isNotEmpty;
+  }
+
+  String _latestRawTextFor(_TranscriptSource source) {
+    return source == _TranscriptSource.microphone
+        ? _latestRawMicrophoneTranscription
+        : _latestRawSystemAudioTranscription;
+  }
+
+  void _setLatestRawTextFor(_TranscriptSource source, String text) {
+    if (source == _TranscriptSource.microphone) {
+      _latestRawMicrophoneTranscription = text;
+    } else {
+      _latestRawSystemAudioTranscription = text;
+    }
+  }
+
+  String _committedRawTextFor(_TranscriptSource source) {
+    return source == _TranscriptSource.microphone
+        ? _committedRawMicrophoneTranscription
+        : _committedRawSystemAudioTranscription;
+  }
+
+  void _setCommittedRawTextFor(_TranscriptSource source, String text) {
+    if (source == _TranscriptSource.microphone) {
+      _committedRawMicrophoneTranscription = text;
+    } else {
+      _committedRawSystemAudioTranscription = text;
+    }
+  }
+
+  String _uncommittedRawTextFor(_TranscriptSource source, String rawText) {
+    final raw = rawText.trim();
+    if (raw.isEmpty) return '';
+
+    final committedRaw = _committedRawTextFor(source).trim();
+    if (committedRaw.isEmpty) return raw;
+
+    if (raw.startsWith(committedRaw)) {
+      return raw.substring(committedRaw.length).trimLeft();
+    }
+
+    if (raw.toLowerCase().startsWith(committedRaw.toLowerCase())) {
+      return raw.substring(committedRaw.length).trimLeft();
+    }
+
+    final prefixLength = _commonPrefixLength(
+      raw.toLowerCase(),
+      committedRaw.toLowerCase(),
+    );
+    if (prefixLength / committedRaw.length >= 0.85) {
+      return raw.substring(prefixLength).trimLeft();
+    }
+
+    _setCommittedRawTextFor(source, '');
+    return raw;
+  }
+
+  int _commonPrefixLength(String first, String second) {
+    final limit = first.length < second.length ? first.length : second.length;
+    var index = 0;
+    while (
+        index < limit && first.codeUnitAt(index) == second.codeUnitAt(index)) {
+      index += 1;
+    }
+    return index;
+  }
+
+  void _resetPartialRecognitionState() {
+    _resetPartialRecognitionStateFor(_TranscriptSource.microphone);
+    _resetPartialRecognitionStateFor(_TranscriptSource.systemAudio);
+  }
+
+  void _resetPartialRecognitionStateFor(_TranscriptSource source) {
+    _setLatestRawTextFor(source, '');
+    _setCommittedRawTextFor(source, '');
   }
 
   String _applyPartialCorrections(String text, _TranscriptSource source) {
@@ -1164,6 +2018,14 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _setVisibleTranscription(newText, persist: false);
   }
 
+  void _appendTranslationToController(String text) {
+    final oldText = _translationController.text;
+    final separator = oldText.trim().isEmpty ? '' : '\n\n';
+    final newText = '$oldText$separator$text';
+
+    _setVisibleTranslation(newText, persist: false);
+  }
+
   void _setVisibleTranscription(String text, {bool persist = true}) {
     _suppressTranscriptSnapshot = !persist;
     _transcriptionController.value = TextEditingValue(
@@ -1176,8 +2038,29 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }
   }
 
+  void _setVisibleTranslation(String text, {bool persist = true}) {
+    _suppressTranslationSnapshot = !persist;
+    _translationController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _suppressTranslationSnapshot = false;
+    if (persist) {
+      _sessionService.writeTranslationSnapshot(text);
+    }
+  }
+
   void _copyTranscription() {
-    Clipboard.setData(ClipboardData(text: _transcription));
+    final text =
+        _transcriptTranslationEnabled && _committedTranslation.trim().isNotEmpty
+            ? [
+                _t.pick('Oryginał', 'Original'),
+                _transcription,
+                _t.pick('Tłumaczenie', 'Translation'),
+                _committedTranslation,
+              ].join('\n\n')
+            : _transcription;
+    Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -1193,8 +2076,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   void _clearVisibleTranscription() {
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
+    _livePartialCommitTimer?.cancel();
+    _livePartialCommitTimer = null;
     setState(() {
       _setVisibleTranscription('', persist: false);
+      _setVisibleTranslation('', persist: false);
       _partialMicrophoneTranscription = '';
       _partialSystemAudioTranscription = '';
       _pendingPartialMicrophoneTranscription = '';
@@ -1240,6 +2126,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       sidebarSessionFraction: _sidebarSessionFraction,
       sidebarAutoCorrectionFraction: _sidebarAutoCorrectionFraction,
       explanationCharacterTarget: _explanationCharacterTarget,
+      explanationModel: _selectedExplanationModel,
+      transcriptTranslationEnabled: _transcriptTranslationEnabled,
+      transcriptTranslationLanguage: _selectedTranscriptTranslationLanguage,
+      languageAutoDetectionEnabled: _languageAutoDetectionEnabled,
     );
   }
 
@@ -1485,6 +2375,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     if (wasCurrentSession) {
       setState(() {
         _setVisibleTranscription('', persist: false);
+        _setVisibleTranslation('', persist: false);
         _setSessionContext('', persist: false);
         _partialMicrophoneTranscription = '';
         _partialSystemAudioTranscription = '';
@@ -1563,6 +2454,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           : _currentSessionProject;
       if (shouldClearCurrentSession) {
         _setVisibleTranscription('', persist: false);
+        _setVisibleTranslation('', persist: false);
         _setSessionContext('', persist: false);
         _partialMicrophoneTranscription = '';
         _partialSystemAudioTranscription = '';
@@ -1589,6 +2481,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final controller = TextEditingController(text: settings.apiKey ?? '');
     var rememberApiKey = settings.rememberApiKey;
     var interfaceLanguage = _selectedInterfaceLanguage;
+    var explanationModel = normalizeExplanationModel(_selectedExplanationModel);
 
     if (!mounted) return;
     await showDialog<void>(
@@ -1617,6 +2510,31 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     ],
                     onChanged: (value) {
                       setDialogState(() => interfaceLanguage = value ?? 'pl');
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: explanationModel,
+                    decoration: InputDecoration(
+                      labelText: dialogStrings.pick(
+                        'Model wyjaśnień',
+                        'Explanation model',
+                      ),
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: explanationModelOptions
+                        .map(
+                          (model) => DropdownMenuItem(
+                            value: model,
+                            child: Text(model),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      setDialogState(
+                        () =>
+                            explanationModel = normalizeExplanationModel(value),
+                      );
                     },
                   ),
                   const SizedBox(height: 12),
@@ -1664,10 +2582,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       sidebarAutoCorrectionFraction:
                           _sidebarAutoCorrectionFraction,
                       explanationCharacterTarget: _explanationCharacterTarget,
+                      explanationModel: explanationModel,
+                      transcriptTranslationEnabled:
+                          _transcriptTranslationEnabled,
+                      transcriptTranslationLanguage:
+                          _selectedTranscriptTranslationLanguage,
+                      languageAutoDetectionEnabled:
+                          _languageAutoDetectionEnabled,
                     );
                     if (!context.mounted) return;
                     setState(() {
                       _selectedInterfaceLanguage = interfaceLanguage;
+                      _selectedExplanationModel = explanationModel;
                     });
                     Navigator.of(context).pop();
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -1706,6 +2632,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     return _selectedSource == 'system'
         ? _isSystemAudioListening
         : _speechToText.isListening;
+  }
+
+  bool get _isAudioTransitioning {
+    return _isStartingListening ||
+        _isStoppingListening ||
+        _isSwitchingTranscriptionLanguage;
   }
 
   double get _signalLevel {
@@ -1749,17 +2681,24 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   @override
   void dispose() {
     _signalLevelTimer?.cancel();
+    _languageDetectionTimer?.cancel();
     _transcriptionSaveDebounce?.cancel();
+    _translationSaveDebounce?.cancel();
     _preferenceSaveDebounce?.cancel();
     _partialRenderDebounce?.cancel();
+    _livePartialCommitTimer?.cancel();
     _sessionLibraryRefreshDebounce?.cancel();
     _sessionContextSaveDebounce?.cancel();
     _transcriptionController.removeListener(_scheduleTranscriptSnapshotSave);
+    _translationController.removeListener(_scheduleTranslationSnapshotSave);
     _sessionContextController.removeListener(_scheduleSessionContextSave);
     _systemAudioSubscription?.cancel();
+    _systemAudioControl.invokeMethod('stopMicrophoneProbe');
     _systemAudioControl.invokeMethod('stop');
     _transcriptionController.dispose();
+    _translationController.dispose();
     _questionController.dispose();
+    _questionFocusNode.dispose();
     _sessionContextController.dispose();
     _explanationLengthController.dispose();
     super.dispose();
@@ -1917,6 +2856,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       final effectiveRange = trimmed.isEmpty
           ? _rangeForDeletion(committedText, location.localRange)
           : location.localRange;
+      final segmentIndex = _segmentIndexForCommittedRange(effectiveRange);
       final newText = committedText.replaceRange(
         effectiveRange.start,
         effectiveRange.end,
@@ -1934,6 +2874,9 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                 .toInt(),
           ),
         );
+        _transcriptionSegments
+          ..clear()
+          ..addAll(_segmentsFromTranscription(newText));
         if (trimmed.isEmpty) {
           _statusMessage = _t.pick(
             'Usunięto termin: $original',
@@ -1955,6 +2898,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _persistAutoCorrections();
       }
       _sessionService.writeTranscriptSnapshot(newText);
+      final correctedSegment = segmentIndex == null
+          ? null
+          : _segmentTextAtIndex(newText, segmentIndex);
+      if (correctedSegment != null) {
+        _queueTranscriptSegmentRetranslation(segmentIndex!, correctedSegment);
+      }
       return true;
     }
 
@@ -2154,11 +3103,13 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final localContext = _buildLocalContext(wordIndex);
 
     final id = _nextExplanationId++;
+    final stableId = _newExplanationStableId(id);
     setState(() {
       _explanations.insert(
         0,
         ExplanationItem(
           id: id,
+          stableId: stableId,
           term: term,
           isLoading: true,
         ),
@@ -2174,6 +3125,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         answerLanguage: _selectedAnswerLanguage,
         interfaceLanguage: _selectedInterfaceLanguage,
         characterTarget: _explanationCharacterTarget,
+        explanationModel: _selectedExplanationModel,
       );
       _updateExplanation(
         id,
@@ -2238,6 +3190,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
       if (!isLoading) {
         _sessionService.appendExplanation(
+          id: _explanations[index].stableId,
           term: _explanations[index].term,
           explanation: explanation,
           error: error,
@@ -2255,12 +3208,14 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _forceWebResearch || _questionNeedsWebResearch(question);
     _questionController.clear();
     final id = _nextExplanationId++;
+    final stableId = _newExplanationStableId(id);
     setState(() {
       _isAskingQuestion = true;
       _explanations.insert(
         0,
         ExplanationItem(
           id: id,
+          stableId: stableId,
           term: _t.pick('Pytanie: $question', 'Question: $question'),
           isLoading: true,
         ),
@@ -2382,6 +3337,46 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }).join('\n\n---\n\n');
   }
 
+  KeyEventResult _handleQuestionKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final isPasteShortcut = event.logicalKey == LogicalKeyboardKey.keyV &&
+        (HardwareKeyboard.instance.isMetaPressed ||
+            HardwareKeyboard.instance.isControlPressed);
+    if (!isPasteShortcut) return KeyEventResult.ignored;
+
+    unawaited(_pasteIntoQuestionField());
+    return KeyEventResult.handled;
+  }
+
+  Future<void> _pasteIntoQuestionField() async {
+    final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+    final pastedText = clipboardData?.text;
+    if (pastedText == null || pastedText.isEmpty) return;
+
+    final value = _questionController.value;
+    final currentText = value.text;
+    final selection = value.selection;
+    final selectionStart = selection.isValid
+        ? selection.start.clamp(0, currentText.length).toInt()
+        : currentText.length;
+    final selectionEnd = selection.isValid
+        ? selection.end.clamp(0, currentText.length).toInt()
+        : currentText.length;
+    final start = selectionStart < selectionEnd ? selectionStart : selectionEnd;
+    final end = selectionStart < selectionEnd ? selectionEnd : selectionStart;
+    final nextText = currentText.replaceRange(start, end, pastedText);
+    final nextOffset = start + pastedText.length;
+
+    _questionController.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: nextOffset),
+    );
+    _questionFocusNode.requestFocus();
+  }
+
   Widget _buildQuestionBar() {
     return SafeArea(
       top: false,
@@ -2395,20 +3390,24 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _questionController,
-                minLines: 1,
-                maxLines: 3,
-                textInputAction: TextInputAction.send,
-                decoration: InputDecoration(
-                  labelText: _t.pick(
-                    'Zadaj pytanie do transkrypcji i wyjaśnień',
-                    'Ask a question about the transcript and explanations',
+              child: Focus(
+                onKeyEvent: _handleQuestionKeyEvent,
+                child: TextField(
+                  controller: _questionController,
+                  focusNode: _questionFocusNode,
+                  minLines: 1,
+                  maxLines: 3,
+                  textInputAction: TextInputAction.send,
+                  decoration: InputDecoration(
+                    labelText: _t.pick(
+                      'Zadaj pytanie do transkrypcji i wyjaśnień',
+                      'Ask a question about the transcript and explanations',
+                    ),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
                   ),
-                  border: const OutlineInputBorder(),
-                  isDense: true,
+                  onSubmitted: (_) => _askQuestion(),
                 ),
-                onSubmitted: (_) => _askQuestion(),
               ),
             ),
             const SizedBox(width: 12),
@@ -2822,12 +3821,48 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     return '$date $time';
   }
 
-  void _toggleExplanationCollapsed(int id) {
+  void _toggleExplanationCollapsed(String id) {
     setState(() {
       if (!_collapsedExplanationIds.add(id)) {
         _collapsedExplanationIds.remove(id);
       }
     });
+    unawaited(
+      _sessionService.writeCollapsedExplanationIds(_collapsedExplanationIds),
+    );
+  }
+
+  void _setTranscriptTranslationEnabled(bool enabled) {
+    setState(() {
+      _transcriptTranslationEnabled = enabled;
+      _statusMessage = enabled
+          ? _t.pick(
+              'Tłumaczenie transkrypcji włączone dla kolejnych fragmentów.',
+              'Transcript translation enabled for new fragments.',
+            )
+          : _t.pick(
+              'Tłumaczenie transkrypcji wyłączone.',
+              'Transcript translation disabled.',
+            );
+    });
+    if (enabled) {
+      _scheduleLivePartialCommit();
+    } else {
+      _livePartialCommitTimer?.cancel();
+      _livePartialCommitTimer = null;
+    }
+    _saveCurrentPreferences();
+  }
+
+  void _setTranscriptTranslationLanguage(String language) {
+    setState(() {
+      _selectedTranscriptTranslationLanguage = language == 'en' ? 'en' : 'pl';
+      _statusMessage = _t.pick(
+        'Język tłumaczenia zmieniony. Dotyczy kolejnych fragmentów.',
+        'Translation language changed. This applies to new fragments.',
+      );
+    });
+    _saveCurrentPreferences();
   }
 
   Widget _buildResizablePanels() {
@@ -2838,6 +3873,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         final transcriptionWidth = availableWidth * _transcriptionPanelFraction;
         final explanationWidth = availableWidth - transcriptionWidth;
         final visibleTranscript = _visibleTranscript;
+        final visibleTranslation = _visibleTranslation;
 
         return Row(
           children: [
@@ -2845,9 +3881,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
               width: transcriptionWidth,
               child: TranscriptionView(
                 segments: visibleTranscript.segments,
+                translationSegments: visibleTranslation.segments,
                 isTruncated: visibleTranscript.isTruncated,
+                translationIsTruncated: visibleTranslation.isTruncated,
                 autoScroll: _isListening,
+                translationEnabled: _transcriptTranslationEnabled,
+                translationLanguage: _selectedTranscriptTranslationLanguage,
                 strings: _t,
+                onTranslationEnabledChanged: _setTranscriptTranslationEnabled,
+                onTranslationLanguageChanged: _setTranscriptTranslationLanguage,
                 onTokenTap: _handleTokenTap,
                 onCopy: _copyTranscription,
                 onClear: _clearVisibleTranscription,
@@ -2884,10 +3926,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                 collapsedIds: _collapsedExplanationIds,
                 strings: _t,
                 onToggleCollapsed: _toggleExplanationCollapsed,
-                onClear: () => setState(() {
-                  _explanations.clear();
-                  _collapsedExplanationIds.clear();
-                }),
+                onClear: () {
+                  setState(() {
+                    _explanations.clear();
+                    _collapsedExplanationIds.clear();
+                  });
+                  unawaited(
+                    _sessionService
+                        .writeCollapsedExplanationIds(_collapsedExplanationIds),
+                  );
+                },
               ),
             ),
           ],
@@ -2940,12 +3988,31 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       child: Text(_t.pick('Polski', 'Polish')),
                     ),
                   ],
-                  onChanged: _isListening
+                  onChanged: _isAudioTransitioning
                       ? null
-                      : (value) {
-                          setState(() => _selectedLocaleId = value ?? 'en_US');
-                          _saveCurrentPreferences();
-                        },
+                      : (value) =>
+                          unawaited(_handleTranscriptionLanguageChanged(value)),
+                ),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: _t.pick(
+                    'Co 10 sekund sprawdza krótką próbkę audio przez OpenAI i przełącza PL/EN, gdy rozmowa zmieni język.',
+                    'Every 10 seconds checks a short audio probe with OpenAI and switches PL/EN when the conversation changes language.',
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: _languageAutoDetectionEnabled,
+                        onChanged: _isAudioTransitioning
+                            ? null
+                            : (value) => _setLanguageAutoDetectionEnabled(
+                                  value ?? false,
+                                ),
+                      ),
+                      Text(_t.pick('Auto język', 'Auto language')),
+                    ],
+                  ),
                 ),
                 const SizedBox(width: 16),
                 DropdownButton<String>(
@@ -2967,7 +4034,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                       ),
                     ),
                   ],
-                  onChanged: _isListening
+                  onChanged: (_isListening || _isAudioTransitioning)
                       ? null
                       : (value) {
                           setState(
@@ -2987,13 +4054,38 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                     const DropdownMenuItem(
                         value: 'en', child: Text('Explanations: EN')),
                   ],
-                  onChanged: _isListening
+                  onChanged: (_isListening || _isAudioTransitioning)
                       ? null
                       : (value) {
                           setState(
                               () => _selectedAnswerLanguage = value ?? 'pl');
                           _saveCurrentPreferences();
                         },
+                ),
+                const SizedBox(width: 16),
+                Tooltip(
+                  message: _t.pick(
+                    'Model używany do wyjaśnień klikniętych terminów',
+                    'Model used for clicked-term explanations',
+                  ),
+                  child: DropdownButton<String>(
+                    value: _selectedExplanationModel,
+                    items: explanationModelOptions
+                        .map(
+                          (model) => DropdownMenuItem(
+                            value: model,
+                            child: Text(model),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      setState(
+                        () => _selectedExplanationModel =
+                            normalizeExplanationModel(value),
+                      );
+                      _saveCurrentPreferences();
+                    },
+                  ),
                 ),
                 const SizedBox(width: 16),
                 SizedBox(
@@ -3092,10 +4184,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: (_speechEnabled && !_isListening)
-            ? _startListening
-            : _stopListening,
-        child: Icon(_isListening ? Icons.stop : Icons.mic),
+        onPressed: (!_speechEnabled || _isAudioTransitioning)
+            ? null
+            : _isListening
+                ? () => unawaited(_stopListening())
+                : () => unawaited(_startListening()),
+        child: _isAudioTransitioning
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.4),
+              )
+            : Icon(_isListening ? Icons.stop : Icons.mic),
       ),
     );
   }

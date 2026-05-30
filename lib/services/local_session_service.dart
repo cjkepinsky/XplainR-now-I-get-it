@@ -4,12 +4,14 @@ import 'dart:io';
 import '../models/explanation_citation.dart';
 
 class LocalExplanationRecord {
+  final String id;
   final String term;
   final String? explanation;
   final String? error;
   final List<ExplanationCitation> citations;
 
   const LocalExplanationRecord({
+    required this.id,
     required this.term,
     this.explanation,
     this.error,
@@ -20,15 +22,19 @@ class LocalExplanationRecord {
 class LocalSessionSnapshot {
   final Directory directory;
   final String transcription;
+  final String translation;
   final String sessionContext;
   final List<LocalExplanationRecord> explanations;
+  final Set<String> collapsedExplanationIds;
   final String project;
 
   const LocalSessionSnapshot({
     required this.directory,
     required this.transcription,
+    required this.translation,
     required this.sessionContext,
     required this.explanations,
+    required this.collapsedExplanationIds,
     required this.project,
   });
 }
@@ -133,6 +139,9 @@ class LocalSessionService {
     required String speechLanguage,
     required String answerLanguage,
     required String audioSource,
+    required bool transcriptTranslationEnabled,
+    required String transcriptTranslationLanguage,
+    required bool languageAutoDetectionEnabled,
     String project = defaultProject,
   }) async {
     final now = DateTime.now();
@@ -150,13 +159,32 @@ class LocalSessionService {
         'speechLanguage': speechLanguage,
         'answerLanguage': answerLanguage,
         'audioSource': audioSource,
+        'transcriptTranslationEnabled': transcriptTranslationEnabled,
+        'transcriptTranslationLanguage': transcriptTranslationLanguage,
+        'languageAutoDetectionEnabled': languageAutoDetectionEnabled,
         'project': project.trim().isEmpty ? defaultProject : project.trim(),
       }),
     );
 
     await File('${sessionDirectory.path}/transcription.txt').writeAsString('');
+    await File('${sessionDirectory.path}/translation.txt').writeAsString('');
     await File('${sessionDirectory.path}/context.txt').writeAsString('');
     await File('${sessionDirectory.path}/explanations.jsonl').writeAsString('');
+    await File('${sessionDirectory.path}/events.jsonl').writeAsString('');
+    await File('${sessionDirectory.path}/collapsed_explanations.json')
+        .writeAsString('[]');
+    await appendEvent(
+      type: 'session_started',
+      details: {
+        'speechLanguage': speechLanguage,
+        'answerLanguage': answerLanguage,
+        'audioSource': audioSource,
+        'transcriptTranslationEnabled': transcriptTranslationEnabled,
+        'transcriptTranslationLanguage': transcriptTranslationLanguage,
+        'languageAutoDetectionEnabled': languageAutoDetectionEnabled,
+        'project': project.trim().isEmpty ? defaultProject : project.trim(),
+      },
+    );
     return sessionDirectory;
   }
 
@@ -179,6 +207,43 @@ class LocalSessionService {
     await file.writeAsString(text.trimRight());
   }
 
+  Future<void> appendTranslationSegment(String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    final directory = _currentSessionDirectory;
+    if (directory == null) return;
+
+    final file = File('${directory.path}/translation.txt');
+    await file.writeAsString('$trimmed\n\n', mode: FileMode.append);
+  }
+
+  Future<void> appendEvent({
+    required String type,
+    Map<String, Object?> details = const {},
+  }) async {
+    final directory = _currentSessionDirectory;
+    if (directory == null) return;
+
+    final file = File('${directory.path}/events.jsonl');
+    await file.writeAsString(
+      '${jsonEncode({
+            'createdAt': DateTime.now().toIso8601String(),
+            'type': type,
+            'details': details,
+          })}\n',
+      mode: FileMode.append,
+    );
+  }
+
+  Future<void> writeTranslationSnapshot(String text) async {
+    final directory = _currentSessionDirectory;
+    if (directory == null) return;
+
+    final file = File('${directory.path}/translation.txt');
+    await file.writeAsString(text.trimRight());
+  }
+
   Future<void> writeSessionContext(String text) async {
     final directory = _currentSessionDirectory;
     if (directory == null) return;
@@ -188,6 +253,7 @@ class LocalSessionService {
   }
 
   Future<void> appendExplanation({
+    required String id,
     required String term,
     String? explanation,
     String? error,
@@ -199,6 +265,7 @@ class LocalSessionService {
     final file = File('${directory.path}/explanations.jsonl');
     await file.writeAsString(
       '${jsonEncode({
+            'id': id,
             'createdAt': DateTime.now().toIso8601String(),
             'term': term,
             'explanation': explanation,
@@ -219,25 +286,45 @@ class LocalSessionService {
   Future<LocalSessionSnapshot> loadSession(Directory sessionDirectory) async {
     final transcriptionFile =
         File('${sessionDirectory.path}/transcription.txt');
+    final translationFile = File('${sessionDirectory.path}/translation.txt');
     final contextFile = File('${sessionDirectory.path}/context.txt');
     final explanationsFile =
         File('${sessionDirectory.path}/explanations.jsonl');
+    final collapsedExplanationsFile =
+        File('${sessionDirectory.path}/collapsed_explanations.json');
     final metadata = await _readMetadata(sessionDirectory);
     final transcription = await transcriptionFile.exists()
         ? await transcriptionFile.readAsString()
         : '';
+    final translation = await translationFile.exists()
+        ? await translationFile.readAsString()
+        : '';
     final sessionContext =
         await contextFile.exists() ? await contextFile.readAsString() : '';
     final explanations = await _readExplanations(explanationsFile);
+    final collapsedExplanationIds =
+        await _readCollapsedExplanationIds(collapsedExplanationsFile);
 
     _currentSessionDirectory = sessionDirectory;
     return LocalSessionSnapshot(
       directory: sessionDirectory,
       transcription: transcription.trimRight(),
+      translation: translation.trimRight(),
       sessionContext: sessionContext.trimRight(),
       explanations: explanations,
+      collapsedExplanationIds: collapsedExplanationIds,
       project: _projectFromMetadata(metadata),
     );
+  }
+
+  Future<void> writeCollapsedExplanationIds(Set<String> ids) async {
+    final directory = _currentSessionDirectory;
+    if (directory == null) return;
+
+    final file = File('${directory.path}/collapsed_explanations.json');
+    final sorted = ids.where((id) => id.trim().isNotEmpty).toList()..sort();
+    await file
+        .writeAsString(const JsonEncoder.withIndent('  ').convert(sorted));
   }
 
   Future<List<LocalSessionSummary>> loadSessionSummaries() async {
@@ -482,13 +569,18 @@ class LocalSessionService {
 
     final records = <LocalExplanationRecord>[];
     final lines = await file.readAsLines();
-    for (final line in lines) {
+    for (var index = 0; index < lines.length; index += 1) {
+      final line = lines[index];
       if (line.trim().isEmpty) continue;
       try {
         final decoded = jsonDecode(line);
         if (decoded is! Map<String, dynamic>) continue;
+        final decodedId = decoded['id'] as String?;
         records.add(
           LocalExplanationRecord(
+            id: decodedId?.trim().isNotEmpty == true
+                ? decodedId!.trim()
+                : 'legacy-$index',
             term: decoded['term'] as String? ?? '',
             explanation: decoded['explanation'] as String?,
             error: decoded['error'] as String?,
@@ -501,6 +593,22 @@ class LocalSessionService {
     }
 
     return records.where((record) => record.term.trim().isNotEmpty).toList();
+  }
+
+  Future<Set<String>> _readCollapsedExplanationIds(File file) async {
+    if (!await file.exists()) return <String>{};
+
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! List) return <String>{};
+      return decoded
+          .whereType<String>()
+          .map((id) => id.trim())
+          .where((id) => id.isNotEmpty)
+          .toSet();
+    } catch (_) {
+      return <String>{};
+    }
   }
 
   List<ExplanationCitation> _readCitations(Object? value) {
