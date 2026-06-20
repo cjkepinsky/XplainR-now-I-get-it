@@ -628,7 +628,7 @@ class LocalSessionService {
   }
 
   Future<Directory> _appRoot() async {
-    final home = Platform.environment['HOME'] ?? Directory.current.path;
+    final home = _userHomePath();
     final directory = Directory('$home/.xplainr');
     if (!await directory.exists()) {
       await directory.create(recursive: true);
@@ -697,7 +697,7 @@ class LocalSessionService {
   }
 
   Future<Directory> _trashDirectory() async {
-    final home = Platform.environment['HOME'] ?? Directory.current.path;
+    final home = _userHomePath();
     final directory = Directory('$home/.Trash');
     if (!await directory.exists()) {
       await directory.create(recursive: true);
@@ -896,5 +896,18 @@ class LocalSessionService {
       value.minute.toString().padLeft(2, '0'),
       value.second.toString().padLeft(2, '0'),
     ].join('-');
+  }
+
+  String _userHomePath() {
+    final home = Platform.environment['HOME'] ?? Directory.current.path;
+    final containerMarker = '${Platform.pathSeparator}Library'
+        '${Platform.pathSeparator}Containers'
+        '${Platform.pathSeparator}';
+    final dataSuffix = '${Platform.pathSeparator}Data';
+    final containerIndex = home.indexOf(containerMarker);
+    if (containerIndex > 0 && home.endsWith(dataSuffix)) {
+      return home.substring(0, containerIndex);
+    }
+    return home;
   }
 }

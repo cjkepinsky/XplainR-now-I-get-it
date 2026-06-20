@@ -149,6 +149,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final TextEditingController _questionController = TextEditingController();
   final TextEditingController _sessionContextController =
       TextEditingController();
+  final TextEditingController _transcriptSearchController =
+      TextEditingController();
   final FocusNode _questionFocusNode = FocusNode();
   final TextEditingController _explanationLengthController =
       TextEditingController(text: '300');
@@ -164,6 +166,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _isSwitchingTranscriptionLanguage = false;
   bool _forceWebResearch = false;
   bool _transcriptTranslationEnabled = false;
+  bool _isTranslatingExistingTranscript = false;
   bool _languageAutoDetectionEnabled = false;
   bool _isLanguageDetectionProbeRunning = false;
   String _selectedLocaleId = 'en_US';
@@ -205,9 +208,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String _latestRawSystemAudioTranscription = '';
   String _committedRawMicrophoneTranscription = '';
   String _committedRawSystemAudioTranscription = '';
+  String _transcriptSearchQuery = '';
   RegExp? _autoCorrectionMatcher;
   Map<String, String> _autoCorrectionReplacements = {};
   Future<void> _translationQueue = Future.value();
+  int _existingTranslationRunId = 0;
   String? _languageDetectionCandidateLocaleId;
   int _languageDetectionCandidateCount = 0;
   DateTime? _lastAutoLanguageSwitchAt;
@@ -217,6 +222,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       MethodChannel('xplainr/system_audio_control');
   static const _systemAudioEvents = EventChannel('xplainr/system_audio_events');
   static const _visibleTranscriptWordLimit = 1500;
+  static const _existingTranslationChunkMaxChars = 2800;
   static const _livePartialCommitInterval = Duration(seconds: 5);
   static const _livePartialCommitMinWords = 6;
   static const _languageDetectionInterval = Duration(seconds: 10);
@@ -247,11 +253,24 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     ].where((part) => part.trim().isNotEmpty).join('\n\n');
   }
 
+  bool get _isTranscriptSearchActive =>
+      _transcriptSearchQuery.trim().isNotEmpty;
+
   ({List<TranscriptDisplaySegment> segments, bool isTruncated})
       get _visibleTranscript {
     final fullText = _transcription;
     if (fullText.trim().isEmpty) {
       return (segments: const <TranscriptDisplaySegment>[], isTruncated: false);
+    }
+
+    if (_isTranscriptSearchActive) {
+      return (
+        segments: _filteredTranscriptSnippets(
+          fullText,
+          _transcriptSearchQuery,
+        ),
+        isTruncated: false,
+      );
     }
 
     final tailStart =
@@ -275,6 +294,110 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       segments: _displaySegmentsFromText(fullText.substring(start), start),
       isTruncated: true,
     );
+  }
+
+  List<TranscriptDisplaySegment> _filteredTranscriptSnippets(
+    String text,
+    String query,
+  ) {
+    final normalizedQuery = query.trim().toLowerCase();
+    if (normalizedQuery.isEmpty) return const [];
+
+    final normalizedText = text.toLowerCase();
+    final ranges = <TextRange>[];
+    var searchStart = 0;
+    while (searchStart < normalizedText.length) {
+      final matchStart = normalizedText.indexOf(normalizedQuery, searchStart);
+      if (matchStart == -1) break;
+
+      final matchEnd = matchStart + normalizedQuery.length;
+      final snippetStart = _searchSnippetStart(text, matchStart);
+      final snippetEnd = _searchSnippetEnd(text, matchEnd);
+      final trimmedRange = _trimSearchSnippetRange(
+        text,
+        TextRange(start: snippetStart, end: snippetEnd),
+      );
+
+      if (trimmedRange != null) {
+        if (ranges.isNotEmpty && trimmedRange.start <= ranges.last.end + 32) {
+          final previous = ranges.removeLast();
+          ranges.add(
+            TextRange(
+              start: previous.start,
+              end: previous.end > trimmedRange.end
+                  ? previous.end
+                  : trimmedRange.end,
+            ),
+          );
+        } else {
+          ranges.add(trimmedRange);
+        }
+      }
+
+      searchStart = matchEnd;
+    }
+
+    return ranges
+        .map(
+          (range) => TranscriptDisplaySegment(
+            text: text.substring(range.start, range.end),
+            startOffset: range.start,
+          ),
+        )
+        .toList();
+  }
+
+  int _searchSnippetStart(String text, int matchStart) {
+    var index = matchStart.clamp(0, text.length).toInt();
+    while (index > 0 && !_isSearchWhitespace(text[index - 1])) {
+      index -= 1;
+    }
+
+    for (var word = 0; word < 8; word += 1) {
+      while (index > 0 && _isSearchWhitespace(text[index - 1])) {
+        index -= 1;
+      }
+      while (index > 0 && !_isSearchWhitespace(text[index - 1])) {
+        index -= 1;
+      }
+    }
+    return index;
+  }
+
+  int _searchSnippetEnd(String text, int matchEnd) {
+    var index = matchEnd.clamp(0, text.length).toInt();
+    while (index < text.length && !_isSearchWhitespace(text[index])) {
+      index += 1;
+    }
+
+    for (var word = 0; word < 10; word += 1) {
+      while (index < text.length && _isSearchWhitespace(text[index])) {
+        index += 1;
+      }
+      while (index < text.length && !_isSearchWhitespace(text[index])) {
+        index += 1;
+      }
+    }
+    return index;
+  }
+
+  TextRange? _trimSearchSnippetRange(String text, TextRange range) {
+    var start = range.start.clamp(0, text.length).toInt();
+    var end = range.end.clamp(start, text.length).toInt();
+
+    while (start < end && _isSearchWhitespace(text[start])) {
+      start += 1;
+    }
+    while (end > start && _isSearchWhitespace(text[end - 1])) {
+      end -= 1;
+    }
+
+    if (start >= end) return null;
+    return TextRange(start: start, end: end);
+  }
+
+  bool _isSearchWhitespace(String char) {
+    return char.codeUnitAt(0) <= 32;
   }
 
   ({List<TranscriptDisplaySegment> segments, bool isTruncated})
@@ -1434,6 +1557,187 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     });
   }
 
+  void _queueExistingTranscriptTranslationIfNeeded() {
+    if (!_transcriptTranslationEnabled ||
+        _isTranslatingExistingTranscript ||
+        _committedTranslation.trim().isNotEmpty) {
+      return;
+    }
+
+    final transcript = _committedTranscription.trim();
+    if (transcript.isEmpty) return;
+
+    final targetLanguage = _selectedTranscriptTranslationLanguage;
+    final sourceLanguage = _speechLanguageCode;
+    final context = _sessionContext;
+    final runId = _existingTranslationRunId + 1;
+
+    setState(() {
+      _existingTranslationRunId = runId;
+      _isTranslatingExistingTranscript = true;
+      _statusMessage = _t.pick(
+        'Tłumaczę zapisaną transkrypcję...',
+        'Translating the saved transcript...',
+      );
+    });
+
+    _translationQueue = _translationQueue
+        .catchError((_) {})
+        .then(
+          (_) => _translateExistingTranscriptSnapshot(
+            transcript,
+            runId: runId,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            sessionContext: context,
+          ),
+        )
+        .catchError((error) {
+      if (!mounted) return;
+      setState(() {
+        _isTranslatingExistingTranscript = false;
+        _statusMessage = _t.pick(
+          'Błąd tłumaczenia zapisanej transkrypcji: $error',
+          'Saved transcript translation error: $error',
+        );
+      });
+    });
+  }
+
+  Future<void> _translateExistingTranscriptSnapshot(
+    String transcript, {
+    required int runId,
+    required String sourceLanguage,
+    required String targetLanguage,
+    required String sessionContext,
+  }) async {
+    final chunks = _translationChunksForTranscript(transcript);
+    if (chunks.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        if (_existingTranslationRunId == runId) {
+          _isTranslatingExistingTranscript = false;
+        }
+      });
+      return;
+    }
+
+    final translatedChunks = <String>[];
+    try {
+      for (var index = 0; index < chunks.length; index += 1) {
+        if (!_isActiveExistingTranslationRun(runId)) return;
+
+        setState(() {
+          _statusMessage = _t.pick(
+            'Tłumaczę zapisaną transkrypcję: ${index + 1}/${chunks.length}',
+            'Translating saved transcript: ${index + 1}/${chunks.length}',
+          );
+        });
+
+        final translated = await translateTranscriptSegment(
+          chunks[index],
+          sourceLanguage: sourceLanguage,
+          targetLanguage: targetLanguage,
+          sessionContext: sessionContext,
+          interfaceLanguage: _selectedInterfaceLanguage,
+        );
+
+        if (!_isActiveExistingTranslationRun(runId)) return;
+
+        final cleanTranslation = translated.trim();
+        if (cleanTranslation.isEmpty) continue;
+
+        translatedChunks.add(cleanTranslation);
+        final nextTranslation = translatedChunks.join('\n\n');
+        setState(() {
+          _setVisibleTranslation(nextTranslation, persist: false);
+        });
+        unawaited(_sessionService.writeTranslationSnapshot(nextTranslation));
+      }
+
+      if (!_isActiveExistingTranslationRun(runId)) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Przetłumaczono zapisaną transkrypcję.',
+          'Saved transcript translated.',
+        );
+      });
+    } finally {
+      if (mounted && _existingTranslationRunId == runId) {
+        setState(() {
+          _isTranslatingExistingTranscript = false;
+        });
+      }
+    }
+  }
+
+  List<String> _translationChunksForTranscript(String transcript) {
+    final chunks = <String>[];
+    final segments = _segmentsFromTranscription(transcript);
+    for (final segment in segments) {
+      chunks.addAll(
+        _splitTranslationSegment(
+          segment,
+          maxChars: _existingTranslationChunkMaxChars,
+        ),
+      );
+    }
+    return chunks;
+  }
+
+  bool _isActiveExistingTranslationRun(int runId) {
+    return mounted &&
+        _transcriptTranslationEnabled &&
+        _isTranslatingExistingTranscript &&
+        _existingTranslationRunId == runId;
+  }
+
+  List<String> _splitTranslationSegment(
+    String segment, {
+    required int maxChars,
+  }) {
+    final trimmed = segment.trim();
+    if (trimmed.isEmpty) return const [];
+    if (trimmed.length <= maxChars) return [trimmed];
+
+    final chunks = <String>[];
+    final words = trimmed.split(RegExp(r'\s+'));
+    final buffer = StringBuffer();
+
+    void flushBuffer() {
+      final chunk = buffer.toString().trim();
+      if (chunk.isNotEmpty) chunks.add(chunk);
+      buffer.clear();
+    }
+
+    for (final word in words) {
+      if (word.length > maxChars) {
+        flushBuffer();
+        var start = 0;
+        while (start < word.length) {
+          final end =
+              start + maxChars < word.length ? start + maxChars : word.length;
+          chunks.add(word.substring(start, end));
+          start = end;
+        }
+        continue;
+      }
+
+      if (buffer.isEmpty) {
+        buffer.write(word);
+      } else if (buffer.length + 1 + word.length > maxChars) {
+        flushBuffer();
+        buffer.write(word);
+      } else {
+        buffer.write(' ');
+        buffer.write(word);
+      }
+    }
+
+    flushBuffer();
+    return chunks;
+  }
+
   String get _speechLanguageCode {
     return _selectedLocaleId.toLowerCase().startsWith('pl') ? 'pl' : 'en';
   }
@@ -2073,6 +2377,15 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     );
   }
 
+  void _setTranscriptSearchQuery(String value) {
+    setState(() => _transcriptSearchQuery = value);
+  }
+
+  void _clearTranscriptSearch() {
+    _transcriptSearchController.clear();
+    setState(() => _transcriptSearchQuery = '');
+  }
+
   void _clearVisibleTranscription() {
     _partialRenderDebounce?.cancel();
     _partialRenderDebounce = null;
@@ -2700,6 +3013,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _questionController.dispose();
     _questionFocusNode.dispose();
     _sessionContextController.dispose();
+    _transcriptSearchController.dispose();
     _explanationLengthController.dispose();
     super.dispose();
   }
@@ -3833,13 +4147,26 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   }
 
   void _setTranscriptTranslationEnabled(bool enabled) {
+    final shouldTranslateExisting = enabled &&
+        _committedTranscription.trim().isNotEmpty &&
+        _committedTranslation.trim().isEmpty;
+
     setState(() {
       _transcriptTranslationEnabled = enabled;
+      if (!enabled) {
+        _existingTranslationRunId += 1;
+        _isTranslatingExistingTranscript = false;
+      }
       _statusMessage = enabled
-          ? _t.pick(
-              'Tłumaczenie transkrypcji włączone dla kolejnych fragmentów.',
-              'Transcript translation enabled for new fragments.',
-            )
+          ? shouldTranslateExisting
+              ? _t.pick(
+                  'Tłumaczę zapisaną transkrypcję...',
+                  'Translating the saved transcript...',
+                )
+              : _t.pick(
+                  'Tłumaczenie transkrypcji włączone dla kolejnych fragmentów.',
+                  'Transcript translation enabled for new fragments.',
+                )
           : _t.pick(
               'Tłumaczenie transkrypcji wyłączone.',
               'Transcript translation disabled.',
@@ -3847,6 +4174,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     });
     if (enabled) {
       _scheduleLivePartialCommit();
+      _queueExistingTranscriptTranslationIfNeeded();
     } else {
       _livePartialCommitTimer?.cancel();
       _livePartialCommitTimer = null;
@@ -3855,13 +4183,26 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   }
 
   void _setTranscriptTranslationLanguage(String language) {
+    final nextLanguage = language == 'en' ? 'en' : 'pl';
+    final shouldTranslateExisting = _transcriptTranslationEnabled &&
+        _committedTranscription.trim().isNotEmpty &&
+        _committedTranslation.trim().isEmpty;
+
     setState(() {
-      _selectedTranscriptTranslationLanguage = language == 'en' ? 'en' : 'pl';
-      _statusMessage = _t.pick(
-        'Język tłumaczenia zmieniony. Dotyczy kolejnych fragmentów.',
-        'Translation language changed. This applies to new fragments.',
-      );
+      _selectedTranscriptTranslationLanguage = nextLanguage;
+      _statusMessage = shouldTranslateExisting
+          ? _t.pick(
+              'Język tłumaczenia zmieniony. Tłumaczę zapisaną transkrypcję...',
+              'Translation language changed. Translating the saved transcript...',
+            )
+          : _t.pick(
+              'Język tłumaczenia zmieniony. Dotyczy kolejnych fragmentów.',
+              'Translation language changed. This applies to new fragments.',
+            );
     });
+    if (shouldTranslateExisting) {
+      _queueExistingTranscriptTranslationIfNeeded();
+    }
     _saveCurrentPreferences();
   }
 
@@ -3884,12 +4225,21 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                 translationSegments: visibleTranslation.segments,
                 isTruncated: visibleTranscript.isTruncated,
                 translationIsTruncated: visibleTranslation.isTruncated,
-                autoScroll: _isListening,
+                autoScroll:
+                    (_isListening || _isTranslatingExistingTranscript) &&
+                        !_isTranscriptSearchActive,
                 translationEnabled: _transcriptTranslationEnabled,
+                translationInProgress: _isTranslatingExistingTranscript,
                 translationLanguage: _selectedTranscriptTranslationLanguage,
+                searchController: _transcriptSearchController,
+                searchActive: _isTranscriptSearchActive,
+                searchResultCount: visibleTranscript.segments.length,
+                hasTranscript: _transcription.trim().isNotEmpty,
                 strings: _t,
                 onTranslationEnabledChanged: _setTranscriptTranslationEnabled,
                 onTranslationLanguageChanged: _setTranscriptTranslationLanguage,
+                onSearchChanged: _setTranscriptSearchQuery,
+                onClearSearch: _clearTranscriptSearch,
                 onTokenTap: _handleTokenTap,
                 onCopy: _copyTranscription,
                 onClear: _clearVisibleTranscription,

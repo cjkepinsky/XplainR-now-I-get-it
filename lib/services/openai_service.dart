@@ -123,7 +123,7 @@ class OpenAiSettings {
 }
 
 Future<Directory> _applicationSupportDirectory() async {
-  final home = Platform.environment['HOME'] ?? Directory.current.path;
+  final home = _userHomePath();
   final directory = Directory('$home/Library/Application Support/XplainR');
   if (!await directory.exists()) {
     await directory.create(recursive: true);
@@ -137,11 +137,24 @@ Future<File> _settingsFileForWrite() async {
 }
 
 List<File> _settingsFilesForRead() {
-  final home = Platform.environment['HOME'] ?? Directory.current.path;
+  final home = _userHomePath();
   return [
     File('$home/Library/Application Support/XplainR/settings.json'),
     File('$home/.xplainr/settings.json'),
   ];
+}
+
+String _userHomePath() {
+  final home = Platform.environment['HOME'] ?? Directory.current.path;
+  final containerMarker = '${Platform.pathSeparator}Library'
+      '${Platform.pathSeparator}Containers'
+      '${Platform.pathSeparator}';
+  final dataSuffix = '${Platform.pathSeparator}Data';
+  final containerIndex = home.indexOf(containerMarker);
+  if (containerIndex > 0 && home.endsWith(dataSuffix)) {
+    return home.substring(0, containerIndex);
+  }
+  return home;
 }
 
 Future<OpenAiSettings> _getSavedOpenAiSettings() async {

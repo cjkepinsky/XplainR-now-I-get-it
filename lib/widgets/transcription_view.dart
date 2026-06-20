@@ -30,10 +30,17 @@ class TranscriptionView extends StatefulWidget {
   final bool translationIsTruncated;
   final bool autoScroll;
   final bool translationEnabled;
+  final bool translationInProgress;
   final String translationLanguage;
+  final TextEditingController searchController;
+  final bool searchActive;
+  final int searchResultCount;
+  final bool hasTranscript;
   final AppStrings strings;
   final ValueChanged<bool> onTranslationEnabledChanged;
   final ValueChanged<String> onTranslationLanguageChanged;
+  final ValueChanged<String> onSearchChanged;
+  final VoidCallback onClearSearch;
   final void Function(TranscriptToken token) onTokenTap;
   final VoidCallback onCopy;
   final VoidCallback onClear;
@@ -46,10 +53,17 @@ class TranscriptionView extends StatefulWidget {
     required this.translationIsTruncated,
     required this.autoScroll,
     required this.translationEnabled,
+    required this.translationInProgress,
     required this.translationLanguage,
+    required this.searchController,
+    required this.searchActive,
+    required this.searchResultCount,
+    required this.hasTranscript,
     required this.strings,
     required this.onTranslationEnabledChanged,
     required this.onTranslationLanguageChanged,
+    required this.onSearchChanged,
+    required this.onClearSearch,
     required this.onTokenTap,
     required this.onCopy,
     required this.onClear,
@@ -63,8 +77,6 @@ class _TranscriptionViewState extends State<TranscriptionView> {
   final ScrollController _originalScrollController = ScrollController();
   final ScrollController _translationScrollController = ScrollController();
 
-  bool get _hasText =>
-      widget.segments.any((segment) => segment.text.trim().isNotEmpty);
   bool get _hasTranslation => widget.translationSegments
       .any((segment) => segment.text.trim().isNotEmpty);
 
@@ -156,6 +168,40 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     SizedBox(
+                      width: 260,
+                      height: 36,
+                      child: TextField(
+                        controller: widget.searchController,
+                        textInputAction: TextInputAction.search,
+                        decoration: InputDecoration(
+                          prefixIcon: const Icon(Icons.search, size: 18),
+                          suffixIcon: widget.searchActive
+                              ? IconButton(
+                                  tooltip: widget.strings
+                                      .pick('Wyczyść filtr', 'Clear filter'),
+                                  icon: const Icon(Icons.close, size: 18),
+                                  onPressed: widget.onClearSearch,
+                                )
+                              : null,
+                          labelText: widget.strings.pick(
+                              'Szukaj w transkrypcji', 'Search transcript'),
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onChanged: widget.onSearchChanged,
+                      ),
+                    ),
+                    if (widget.searchActive)
+                      Text(
+                        widget.strings.pick(
+                          '${widget.searchResultCount} wyników',
+                          '${widget.searchResultCount} matches',
+                        ),
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                    SizedBox(
                       height: 32,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -220,10 +266,10 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                 tooltip: widget.strings
                     .pick('Kopiuj transkrypcję', 'Copy transcript'),
                 icon: const Icon(Icons.content_copy),
-                onPressed:
-                    (_hasText || (widget.translationEnabled && _hasTranslation))
-                        ? widget.onCopy
-                        : null,
+                onPressed: (widget.hasTranscript ||
+                        (widget.translationEnabled && _hasTranslation))
+                    ? widget.onCopy
+                    : null,
               ),
               IconButton(
                 tooltip: widget.strings.pick(
@@ -231,7 +277,7 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                   'Clear transcript from view',
                 ),
                 icon: const Icon(Icons.delete_outline),
-                onPressed: _hasText ? widget.onClear : null,
+                onPressed: widget.hasTranscript ? widget.onClear : null,
               ),
             ],
           ),
@@ -335,15 +381,25 @@ class _TranscriptionViewState extends State<TranscriptionView> {
                 )
               : Center(
                   child: Text(
-                    isOriginal
+                    isOriginal && widget.searchActive
                         ? widget.strings.pick(
-                            'Brak transkrypcji.',
-                            'No transcript yet.',
+                            'Brak wyników.',
+                            'No matches.',
                           )
-                        : widget.strings.pick(
-                            'Tłumaczenie pojawi się po kolejnych fragmentach transkrypcji.',
-                            'Translation will appear after new transcript fragments.',
-                          ),
+                        : isOriginal
+                            ? widget.strings.pick(
+                                'Brak transkrypcji.',
+                                'No transcript yet.',
+                              )
+                            : widget.translationInProgress
+                                ? widget.strings.pick(
+                                    'Tłumaczę zapisaną transkrypcję...',
+                                    'Translating the saved transcript...',
+                                  )
+                                : widget.strings.pick(
+                                    'Tłumaczenie pojawi się po kolejnych fragmentach transkrypcji.',
+                                    'Translation will appear after new transcript fragments.',
+                                  ),
                     style: Theme.of(context).textTheme.bodyMedium,
                     textAlign: TextAlign.center,
                   ),
