@@ -7,6 +7,8 @@ import '../models/explanation_citation.dart';
 
 const defaultExplanationModel = 'gpt-4.1-mini';
 const defaultLanguageDetectionModel = 'whisper-1';
+const defaultTranscriptionEngine = 'appleSpeech';
+const localWhisperKitTranscriptionEngine = 'localWhisperKit';
 const explanationModelOptions = <String>[
   defaultExplanationModel,
   'gpt-4.1',
@@ -20,6 +22,12 @@ String normalizeExplanationModel(String? model) {
     return trimmed;
   }
   return defaultExplanationModel;
+}
+
+String normalizeTranscriptionEngine(String? engine) {
+  return engine == localWhisperKitTranscriptionEngine
+      ? localWhisperKitTranscriptionEngine
+      : defaultTranscriptionEngine;
 }
 
 class OpenAiAnswer {
@@ -58,6 +66,7 @@ class OpenAiSettings {
   final bool transcriptTranslationEnabled;
   final String transcriptTranslationLanguage;
   final bool languageAutoDetectionEnabled;
+  final String transcriptionEngine;
 
   const OpenAiSettings({
     this.apiKey,
@@ -75,6 +84,7 @@ class OpenAiSettings {
     this.transcriptTranslationEnabled = false,
     this.transcriptTranslationLanguage = 'pl',
     this.languageAutoDetectionEnabled = false,
+    this.transcriptionEngine = defaultTranscriptionEngine,
   });
 
   OpenAiSettings copyWith({
@@ -93,6 +103,7 @@ class OpenAiSettings {
     bool? transcriptTranslationEnabled,
     String? transcriptTranslationLanguage,
     bool? languageAutoDetectionEnabled,
+    String? transcriptionEngine,
   }) {
     return OpenAiSettings(
       apiKey: apiKey ?? this.apiKey,
@@ -118,6 +129,8 @@ class OpenAiSettings {
           transcriptTranslationLanguage ?? this.transcriptTranslationLanguage,
       languageAutoDetectionEnabled:
           languageAutoDetectionEnabled ?? this.languageAutoDetectionEnabled,
+      transcriptionEngine: normalizeTranscriptionEngine(
+          transcriptionEngine ?? this.transcriptionEngine),
     );
   }
 }
@@ -188,6 +201,8 @@ Future<OpenAiSettings> _getSavedOpenAiSettings() async {
           data['transcriptTranslationLanguage'] as String? ?? 'pl',
       languageAutoDetectionEnabled:
           data['languageAutoDetectionEnabled'] as bool? ?? false,
+      transcriptionEngine:
+          normalizeTranscriptionEngine(data['transcriptionEngine'] as String?),
     );
   }
 
@@ -227,6 +242,7 @@ Future<void> saveOpenAiSettings({
   bool? transcriptTranslationEnabled,
   String? transcriptTranslationLanguage,
   bool? languageAutoDetectionEnabled,
+  String? transcriptionEngine,
 }) async {
   final currentSettings = await getOpenAiSettings();
   final file = await _settingsFileForWrite();
@@ -256,6 +272,9 @@ Future<void> saveOpenAiSettings({
           currentSettings.transcriptTranslationLanguage,
       'languageAutoDetectionEnabled': languageAutoDetectionEnabled ??
           currentSettings.languageAutoDetectionEnabled,
+      'transcriptionEngine': normalizeTranscriptionEngine(
+        transcriptionEngine ?? currentSettings.transcriptionEngine,
+      ),
     }),
   );
 }
@@ -274,6 +293,7 @@ Future<void> saveAppPreferences({
   required bool transcriptTranslationEnabled,
   required String transcriptTranslationLanguage,
   required bool languageAutoDetectionEnabled,
+  required String transcriptionEngine,
 }) async {
   final settings = await getOpenAiSettings();
   await saveOpenAiSettings(
@@ -292,6 +312,7 @@ Future<void> saveAppPreferences({
     transcriptTranslationEnabled: transcriptTranslationEnabled,
     transcriptTranslationLanguage: transcriptTranslationLanguage,
     languageAutoDetectionEnabled: languageAutoDetectionEnabled,
+    transcriptionEngine: transcriptionEngine,
   );
 }
 

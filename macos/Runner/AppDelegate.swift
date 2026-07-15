@@ -8,7 +8,11 @@ final class LanguageProbeBuffer {
   private let lock = NSLock()
   private var samples: [Int16] = []
   private var sampleRate: Int = 16000
-  private let maxDurationSeconds = 5.0
+  private let maxDurationSeconds: Double
+
+  init(maxDurationSeconds: Double = 5.0) {
+    self.maxDurationSeconds = maxDurationSeconds
+  }
 
   func append(samples newSamples: [Int16], sampleRate newSampleRate: Int) {
     guard !newSamples.isEmpty, newSampleRate > 0 else { return }
@@ -37,6 +41,20 @@ final class LanguageProbeBuffer {
     guard currentSamples.count >= Int(Double(currentSampleRate) * minDurationSeconds) else {
       return nil
     }
+
+    return Self.makeWavData(samples: currentSamples, sampleRate: currentSampleRate)
+  }
+
+  func drainWavData(minDurationSeconds: Double = 2.0) -> Data? {
+    lock.lock()
+    let currentSamples = samples
+    let currentSampleRate = sampleRate
+    guard currentSamples.count >= Int(Double(currentSampleRate) * minDurationSeconds) else {
+      lock.unlock()
+      return nil
+    }
+    samples.removeAll(keepingCapacity: true)
+    lock.unlock()
 
     return Self.makeWavData(samples: currentSamples, sampleRate: currentSampleRate)
   }
@@ -91,9 +109,13 @@ final class LanguageProbeBuffer {
 }
 
 final class MicrophoneLanguageProbe {
+  var eventSink: FlutterEventSink?
+
   private let engine = AVAudioEngine()
   private let probeBuffer = LanguageProbeBuffer()
+  private let transcriptionBuffer = LanguageProbeBuffer(maxDurationSeconds: 30.0)
   private var isStarted = false
+  private var lastLevelEmit = Date.distantPast
 
   func start() async throws {
     if isStarted { return }
@@ -102,6 +124,7 @@ final class MicrophoneLanguageProbe {
     let inputNode = engine.inputNode
     let format = inputNode.outputFormat(forBus: 0)
     probeBuffer.clear()
+    transcriptionBuffer.clear()
     inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
       self?.append(buffer: buffer)
     }
@@ -119,16 +142,22 @@ final class MicrophoneLanguageProbe {
   func stop() {
     guard isStarted else {
       probeBuffer.clear()
+      transcriptionBuffer.clear()
       return
     }
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
     probeBuffer.clear()
+    transcriptionBuffer.clear()
     isStarted = false
   }
 
   func takeWavData() -> Data? {
     probeBuffer.wavData()
+  }
+
+  func takeTranscriptionChunkData(minDurationSeconds: Double = 2.0) -> Data? {
+    transcriptionBuffer.drainWavData(minDurationSeconds: minDurationSeconds)
   }
 
   private func append(buffer: AVAudioPCMBuffer) {
@@ -139,6 +168,8 @@ final class MicrophoneLanguageProbe {
 
     var probeSamples: [Int16] = []
     probeSamples.reserveCapacity(frameLength)
+    var sumSquares = 0.0
+    var sampleCount = 0
 
     if let floatChannels = buffer.floatChannelData {
       for frame in 0..<frameLength {
@@ -147,6 +178,8 @@ final class MicrophoneLanguageProbe {
           mixed += Double(floatChannels[channel][frame])
         }
         mixed /= Double(channelCount)
+        sumSquares += mixed * mixed
+        sampleCount += 1
         probeSamples.append(Self.floatToInt16(mixed))
       }
     } else if let int16Channels = buffer.int16ChannelData {
@@ -155,11 +188,31 @@ final class MicrophoneLanguageProbe {
         for channel in 0..<channelCount {
           mixed += Int(int16Channels[channel][frame])
         }
-        probeSamples.append(Int16(clamping: mixed / channelCount))
+        let mixedSample = Int16(clamping: mixed / channelCount)
+        let normalized = Double(mixedSample) / Double(Int16.max)
+        sumSquares += normalized * normalized
+        sampleCount += 1
+        probeSamples.append(mixedSample)
       }
     }
 
     probeBuffer.append(samples: probeSamples, sampleRate: sampleRate)
+    transcriptionBuffer.append(samples: probeSamples, sampleRate: sampleRate)
+    emitLevel(sumSquares: sumSquares, sampleCount: sampleCount)
+  }
+
+  private func emitLevel(sumSquares: Double, sampleCount: Int) {
+    let now = Date()
+    guard sampleCount > 0, now.timeIntervalSince(lastLevelEmit) >= 0.12 else { return }
+    lastLevelEmit = now
+
+    let rms = sqrt(sumSquares / Double(sampleCount))
+    let db = 20.0 * log10(max(rms, 0.000001))
+    let percent = max(0.0, min(100.0, ((db + 60.0) / 60.0) * 100.0))
+    emit([
+      "type": "microphoneLevel",
+      "level": percent
+    ])
   }
 
   private static func floatToInt16(_ value: Double) -> Int16 {
@@ -183,6 +236,12 @@ final class MicrophoneLanguageProbe {
     throw NSError(domain: "Xplainr", code: 7, userInfo: [
       NSLocalizedDescriptionKey: "Microphone permission is not granted."
     ])
+  }
+
+  private func emit(_ payload: [String: Any]) {
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(payload)
+    }
   }
 }
 
@@ -252,6 +311,50 @@ final class SystemAudioTranscriptionPlugin: NSObject, FlutterStreamHandler {
         } else {
           result(nil)
         }
+      case "startLocalCapture":
+        let args = call.arguments as? [String: Any]
+        let source = args?["source"] as? String ?? "microphone"
+        Task {
+          do {
+            if source == "microphone" || source == "both" {
+              try await self.microphoneProbe.start()
+            }
+            if source == "system" || source == "both" {
+              try await self.transcriber.startAudioCaptureOnly()
+            }
+            result(true)
+          } catch {
+            self.microphoneProbe.stop()
+            await self.transcriber.stop()
+            result(FlutterError(
+              code: "LOCAL_CAPTURE_START_FAILED",
+              message: error.localizedDescription,
+              details: nil
+            ))
+          }
+        }
+      case "stopLocalCapture":
+        Task {
+          self.microphoneProbe.stop()
+          await self.transcriber.stop()
+          result(true)
+        }
+      case "takeLocalTranscriptionChunk":
+        let args = call.arguments as? [String: Any]
+        let source = args?["source"] as? String ?? "microphone"
+        let minDurationSeconds = args?["minDurationSeconds"] as? Double ?? 2.0
+        let data = source == "system"
+          ? self.transcriber.takeTranscriptionChunkData(
+              minDurationSeconds: minDurationSeconds
+            )
+          : self.microphoneProbe.takeTranscriptionChunkData(
+              minDurationSeconds: minDurationSeconds
+            )
+        if let data {
+          result(FlutterStandardTypedData(bytes: data))
+        } else {
+          result(nil)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -260,11 +363,13 @@ final class SystemAudioTranscriptionPlugin: NSObject, FlutterStreamHandler {
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     transcriber.eventSink = events
+    microphoneProbe.eventSink = events
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
     transcriber.eventSink = nil
+    microphoneProbe.eventSink = nil
     return nil
   }
 }
@@ -279,10 +384,12 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
   private var lastLevelEmit = Date.distantPast
   private let sampleQueue = DispatchQueue(label: "xplainr.system-audio.samples")
   private let languageProbeBuffer = LanguageProbeBuffer()
+  private let transcriptionBuffer = LanguageProbeBuffer(maxDurationSeconds: 30.0)
 
   func start(localeId: String) async throws {
     await stop()
     languageProbeBuffer.clear()
+    transcriptionBuffer.clear()
     try await requestSpeechAuthorization()
     try await requestScreenCaptureAuthorization()
 
@@ -321,6 +428,20 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
       }
     }
 
+    try await startScreenCapture(statusMessage: "System audio capture started.")
+  }
+
+  func startAudioCaptureOnly() async throws {
+    await stop()
+    languageProbeBuffer.clear()
+    transcriptionBuffer.clear()
+    try await requestScreenCaptureAuthorization()
+    try await startScreenCapture(
+      statusMessage: "System audio capture started for local transcription."
+    )
+  }
+
+  private func startScreenCapture(statusMessage: String) async throws {
     let content = try await SCShareableContent.current
     guard let display = content.displays.first else {
       throw NSError(domain: "Xplainr", code: 3, userInfo: [
@@ -352,7 +473,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
     try await stream.startCapture()
 
     self.stream = stream
-    emit(["type": "status", "message": "System audio capture started."])
+    emit(["type": "status", "message": statusMessage])
   }
 
   func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -375,11 +496,16 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     languageProbeBuffer.clear()
+    transcriptionBuffer.clear()
     emit(["type": "status", "message": "System audio capture stopped."])
   }
 
   func takeLanguageProbeData() -> Data? {
     languageProbeBuffer.wavData()
+  }
+
+  func takeTranscriptionChunkData(minDurationSeconds: Double = 2.0) -> Data? {
+    transcriptionBuffer.drainWavData(minDurationSeconds: minDurationSeconds)
   }
 
   func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -452,6 +578,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
 
     guard sampleCount > 0 else { return }
     languageProbeBuffer.append(samples: probeSamples, sampleRate: sampleRate)
+    transcriptionBuffer.append(samples: probeSamples, sampleRate: sampleRate)
 
     let rms = sqrt(sumSquares / Double(sampleCount))
     let db = 20.0 * log10(max(rms, 0.000001))

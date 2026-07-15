@@ -1,16 +1,45 @@
-# talkexplainer
+# XplainR
 
-A new Flutter project.
+Desktop assistant for live transcription and technical explanations.
 
-## Getting Started
+XplainR can transcribe live audio from the microphone, system audio, or both
+sources at the same time. It stores sessions locally, supports transcript
+search, term corrections, project-specific auto-corrections, transcript
+translation, contextual explanations, and questions over the saved transcript.
 
-This project is a starting point for a Flutter application.
+## Transcription engines
 
-A few resources to get you started if this is your first Flutter project:
+XplainR supports two live transcription engines:
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- Apple Speech, using the platform speech recognizer.
+- Local WhisperKit, using a local OpenAI-compatible WhisperKit server.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+When Local WhisperKit is selected, XplainR starts the local server
+automatically if it is not already running:
+
+```text
+whisperkit-cli serve --host 127.0.0.1 --port 50060
+```
+
+The app sends audio chunks to:
+
+```text
+http://127.0.0.1:50060/v1/audio/transcriptions
+```
+
+## Dependencies
+
+Required for the Local WhisperKit transcription engine:
+
+- `whisperkit-cli` available on `PATH`, or
+- `WHISPERKIT_CLI_PATH` pointing to the executable.
+
+If the server is already running on port `50060`, XplainR reuses it. If XplainR
+starts the server itself, it stops that managed process when the app closes.
+
+## Development
+
+```text
+flutter analyze
+flutter build macos
+```

@@ -9,6 +9,7 @@ import '../widgets/transcription_view.dart';
 import '../widgets/explanation_history_view.dart';
 import '../services/openai_service.dart';
 import '../services/local_session_service.dart';
+import '../services/local_whisperkit_service.dart';
 import '../l10n/app_strings.dart';
 import '../models/explanation_citation.dart';
 
@@ -164,6 +165,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _isStartingListening = false;
   bool _isStoppingListening = false;
   bool _isSwitchingTranscriptionLanguage = false;
+  bool _isLocalWhisperKitTranscribing = false;
+  bool _isLocalWhisperKitChunkRunning = false;
   bool _forceWebResearch = false;
   bool _transcriptTranslationEnabled = false;
   bool _isTranslatingExistingTranscript = false;
@@ -174,6 +177,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   String _selectedInterfaceLanguage = 'pl';
   String _selectedTranscriptTranslationLanguage = 'pl';
   String _selectedExplanationModel = defaultExplanationModel;
+  String _selectedTranscriptionEngine = defaultTranscriptionEngine;
   String _selectedSource = 'microphone';
   String _selectedProject = LocalSessionService.defaultProject;
   String _currentSessionProject = LocalSessionService.defaultProject;
@@ -187,6 +191,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   Timer? _preferenceSaveDebounce;
   Timer? _partialRenderDebounce;
   Timer? _livePartialCommitTimer;
+  Timer? _localTranscriptionTimer;
   Timer? _sessionLibraryRefreshDebounce;
   Timer? _sessionContextSaveDebounce;
   bool _suppressTranscriptSnapshot = false;
@@ -223,6 +228,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   static const _systemAudioEvents = EventChannel('xplainr/system_audio_events');
   static const _visibleTranscriptWordLimit = 1500;
   static const _existingTranslationChunkMaxChars = 2800;
+  static const _localTranscriptionChunkInterval = Duration(seconds: 4);
   static const _livePartialCommitInterval = Duration(seconds: 5);
   static const _livePartialCommitMinWords = 6;
   static const _languageDetectionInterval = Duration(seconds: 10);
@@ -239,6 +245,22 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       return _t.pick('Bez projektu', 'No project');
     }
     return project;
+  }
+
+  bool get _usesLocalWhisperKit =>
+      _selectedTranscriptionEngine == localWhisperKitTranscriptionEngine;
+
+  bool get _sourceIncludesMicrophone =>
+      _selectedSource == 'microphone' || _selectedSource == 'both';
+
+  bool get _sourceIncludesSystemAudio =>
+      _selectedSource == 'system' || _selectedSource == 'both';
+
+  String _transcriptionEngineLabel(String engine) {
+    if (engine == localWhisperKitTranscriptionEngine) {
+      return _t.pick('WhisperKit lokalnie', 'WhisperKit local');
+    }
+    return 'Apple Speech';
   }
 
   String _newExplanationStableId(int runtimeId) {
@@ -720,6 +742,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _selectedAnswerLanguage = settings.answerLanguage;
       _selectedSource = settings.audioSource;
       _selectedExplanationModel = settings.explanationModel;
+      _selectedTranscriptionEngine =
+          normalizeTranscriptionEngine(settings.transcriptionEngine);
       _transcriptTranslationEnabled = settings.transcriptTranslationEnabled;
       _selectedTranscriptTranslationLanguage =
           settings.transcriptTranslationLanguage;
@@ -736,6 +760,13 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       _explanationLengthController.text =
           _explanationCharacterTarget.toString();
     });
+
+    unawaited(
+      _ensureLocalWhisperKitServerRunning(
+        updateStatus: _usesLocalWhisperKit,
+        force: true,
+      ),
+    );
   }
 
   void _initSpeech() async {
@@ -925,15 +956,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         details: {
           'speechLanguage': _selectedLocaleId,
           'audioSource': _selectedSource,
+          'transcriptionEngine': _selectedTranscriptionEngine,
         },
       );
       await _startSelectedAudioSources();
+      if (!_isListening) return;
       await _startLanguageDetectionIfNeeded();
       await _sessionService.appendEvent(
         type: 'transcription_started',
         details: {
           'speechLanguage': _selectedLocaleId,
           'audioSource': _selectedSource,
+          'transcriptionEngine': _selectedTranscriptionEngine,
         },
       );
     } finally {
@@ -944,6 +978,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   }
 
   Future<void> _startSelectedAudioSources({bool updateStatus = true}) async {
+    if (_usesLocalWhisperKit) {
+      await _startLocalWhisperKitListening(updateStatus: updateStatus);
+      return;
+    }
+
     if (_selectedSource == 'both') {
       await _startCombinedListening(updateStatus: updateStatus);
       return;
@@ -954,6 +993,188 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }
 
     await _startMicrophoneListening(updateStatus: updateStatus);
+  }
+
+  Future<void> _startLocalWhisperKitListening({
+    bool updateStatus = true,
+  }) async {
+    debugPrint('Start local WhisperKit listening');
+    final serverReady = await _ensureLocalWhisperKitServerRunning(
+      updateStatus: updateStatus,
+    );
+    if (!serverReady) return;
+
+    if (updateStatus) {
+      setState(() => _statusMessage = _t.pick(
+            'Uruchamianie lokalnej transkrypcji WhisperKit...',
+            'Starting local WhisperKit transcription...',
+          ));
+    }
+
+    await _systemAudioSubscription?.cancel();
+    _systemAudioSubscription =
+        _systemAudioEvents.receiveBroadcastStream().listen(
+      _handleSystemAudioEvent,
+      onError: (error) {
+        setState(() {
+          _isLocalWhisperKitTranscribing = false;
+          _isSystemAudioListening = false;
+          _statusMessage = _t.pick(
+            'Błąd lokalnego przechwytywania audio: $error',
+            'Local audio capture error: $error',
+          );
+        });
+      },
+    );
+
+    try {
+      await _systemAudioControl.invokeMethod('startLocalCapture', {
+        'source': _selectedSource,
+      });
+      _localTranscriptionTimer?.cancel();
+      _localTranscriptionTimer = Timer.periodic(
+        _localTranscriptionChunkInterval,
+        (_) => unawaited(_runLocalWhisperKitChunk()),
+      );
+      setState(() {
+        _isLocalWhisperKitTranscribing = true;
+        _isSystemAudioListening = _sourceIncludesSystemAudio;
+        _statusMessage = updateStatus
+            ? _t.pick(
+                'Lokalna transkrypcja WhisperKit działa.',
+                'Local WhisperKit transcription is running.',
+              )
+            : _statusMessage;
+      });
+    } catch (error) {
+      await _systemAudioSubscription?.cancel();
+      _systemAudioSubscription = null;
+      setState(() {
+        _isLocalWhisperKitTranscribing = false;
+        _isSystemAudioListening = false;
+        _statusMessage = _t.pick(
+          'Nie udało się uruchomić WhisperKit: $error',
+          'Could not start WhisperKit: $error',
+        );
+      });
+    }
+  }
+
+  Future<bool> _ensureLocalWhisperKitServerRunning({
+    bool updateStatus = true,
+    bool force = false,
+  }) async {
+    if (!_usesLocalWhisperKit && !force) return true;
+
+    if (updateStatus && mounted) {
+      setState(() {
+        _statusMessage = _t.pick(
+          'Uruchamianie lokalnego serwera WhisperKit...',
+          'Starting the local WhisperKit server...',
+        );
+      });
+    }
+
+    try {
+      await localWhisperKitServer.ensureRunning(
+        interfaceLanguage: _selectedInterfaceLanguage,
+      );
+      if (updateStatus && mounted) {
+        setState(() {
+          _statusMessage = _t.pick(
+            'Lokalny serwer WhisperKit jest gotowy.',
+            'The local WhisperKit server is ready.',
+          );
+        });
+      }
+      return true;
+    } catch (error) {
+      if (updateStatus && mounted) {
+        setState(() {
+          _statusMessage = _t.pick(
+            'Nie udało się uruchomić lokalnego serwera WhisperKit: $error',
+            'Could not start the local WhisperKit server: $error',
+          );
+        });
+      }
+      return false;
+    }
+  }
+
+  Future<void> _runLocalWhisperKitChunk({
+    double minDurationSeconds = 2.0,
+  }) async {
+    if (!_usesLocalWhisperKit ||
+        !_isLocalWhisperKitTranscribing ||
+        _isLocalWhisperKitChunkRunning) {
+      return;
+    }
+
+    _isLocalWhisperKitChunkRunning = true;
+    try {
+      for (final source in _localWhisperKitSources()) {
+        await _transcribeLocalWhisperKitSource(
+          source,
+          minDurationSeconds: minDurationSeconds,
+        );
+      }
+    } finally {
+      _isLocalWhisperKitChunkRunning = false;
+    }
+  }
+
+  List<_TranscriptSource> _localWhisperKitSources() {
+    return [
+      if (_sourceIncludesMicrophone) _TranscriptSource.microphone,
+      if (_sourceIncludesSystemAudio) _TranscriptSource.systemAudio,
+    ];
+  }
+
+  Future<void> _transcribeLocalWhisperKitSource(
+    _TranscriptSource source, {
+    required double minDurationSeconds,
+  }) async {
+    final sourceName =
+        source == _TranscriptSource.systemAudio ? 'system' : 'microphone';
+    try {
+      final bytes = await _systemAudioControl.invokeMethod<Uint8List>(
+        'takeLocalTranscriptionChunk',
+        {
+          'source': sourceName,
+          'minDurationSeconds': minDurationSeconds,
+        },
+      );
+      if (bytes == null || bytes.isEmpty) return;
+
+      final transcript = await transcribeWithLocalWhisperKit(
+        bytes,
+        languageCode: _speechLanguageCode,
+        interfaceLanguage: _selectedInterfaceLanguage,
+      );
+      final cleanTranscript = transcript.trim();
+      if (!mounted || cleanTranscript.isEmpty) return;
+
+      setState(() {
+        final appended = _appendTranscriptSegment(
+          cleanTranscript,
+          source: source,
+        );
+        if (appended) {
+          _statusMessage = _t.pick(
+            'Dodano fragment z lokalnego WhisperKit.',
+            'Added a local WhisperKit transcript segment.',
+          );
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = _t.pick(
+          'Błąd lokalnej transkrypcji WhisperKit: $error',
+          'Local WhisperKit transcription error: $error',
+        );
+      });
+    }
   }
 
   Future<void> _ensureActiveSession() async {
@@ -975,6 +1196,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       speechLanguage: _selectedLocaleId,
       answerLanguage: _selectedAnswerLanguage,
       audioSource: _selectedSource,
+      transcriptionEngine: _selectedTranscriptionEngine,
       transcriptTranslationEnabled: _transcriptTranslationEnabled,
       transcriptTranslationLanguage: _selectedTranscriptTranslationLanguage,
       languageAutoDetectionEnabled: _languageAutoDetectionEnabled,
@@ -1049,6 +1271,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         details: {
           'speechLanguage': _selectedLocaleId,
           'audioSource': _selectedSource,
+          'transcriptionEngine': _selectedTranscriptionEngine,
         },
       );
     } finally {
@@ -1062,6 +1285,14 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     bool updateStatus = true,
     bool refreshLibrary = true,
   }) async {
+    if (_usesLocalWhisperKit) {
+      await _stopLocalWhisperKitListening(
+        updateStatus: updateStatus,
+        refreshLibrary: refreshLibrary,
+      );
+      return;
+    }
+
     if (_selectedSource == 'both') {
       await _stopCombinedListening(
         updateStatus: updateStatus,
@@ -1082,6 +1313,41 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       updateStatus: updateStatus,
       refreshLibrary: refreshLibrary,
     );
+  }
+
+  Future<void> _stopLocalWhisperKitListening({
+    bool updateStatus = true,
+    bool refreshLibrary = true,
+  }) async {
+    debugPrint('Stop local WhisperKit listening');
+    _localTranscriptionTimer?.cancel();
+    _localTranscriptionTimer = null;
+
+    await _runLocalWhisperKitChunk(minDurationSeconds: 0.6);
+
+    try {
+      await _systemAudioControl.invokeMethod('stopLocalCapture');
+    } finally {
+      await _systemAudioSubscription?.cancel();
+      _systemAudioSubscription = null;
+      setState(() {
+        _isLocalWhisperKitTranscribing = false;
+        _isSystemAudioListening = false;
+        _microphoneSignalRaw = 0;
+        _microphoneSignalLevel = 0;
+        _systemAudioSignalRaw = 0;
+        _systemAudioSignalLevel = 0;
+        if (updateStatus) {
+          _statusMessage = _t.pick(
+            'Zatrzymano lokalną transkrypcję WhisperKit.',
+            'Local WhisperKit transcription stopped.',
+          );
+        }
+      });
+      if (updateStatus && refreshLibrary) {
+        await _refreshSessionLibraryImmediately();
+      }
+    }
   }
 
   Future<void> _stopMicrophoneListening({
@@ -1263,6 +1529,11 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       if (level is num) {
         _systemAudioSignalRaw = level.toDouble().clamp(0, 100);
       }
+    } else if (type == 'microphoneLevel') {
+      final level = event['level'];
+      if (level is num) {
+        _microphoneSignalRaw = level.toDouble().clamp(0, 100);
+      }
     }
   }
 
@@ -1310,7 +1581,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _isLanguageDetectionProbeRunning = false;
 
     try {
-      await _systemAudioControl.invokeMethod('stopMicrophoneProbe');
+      final localMicrophoneCaptureActive = _usesLocalWhisperKit &&
+          _isLocalWhisperKitTranscribing &&
+          _sourceIncludesMicrophone;
+      if (!localMicrophoneCaptureActive) {
+        await _systemAudioControl.invokeMethod('stopMicrophoneProbe');
+      }
     } catch (_) {
       // The probe may never have been started, which is harmless.
     }
@@ -2443,6 +2719,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
       transcriptTranslationEnabled: _transcriptTranslationEnabled,
       transcriptTranslationLanguage: _selectedTranscriptTranslationLanguage,
       languageAutoDetectionEnabled: _languageAutoDetectionEnabled,
+      transcriptionEngine: _selectedTranscriptionEngine,
     );
   }
 
@@ -2902,6 +3179,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                           _selectedTranscriptTranslationLanguage,
                       languageAutoDetectionEnabled:
                           _languageAutoDetectionEnabled,
+                      transcriptionEngine: _selectedTranscriptionEngine,
                     );
                     if (!context.mounted) return;
                     setState(() {
@@ -2938,6 +3216,10 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   }
 
   bool get _isListening {
+    if (_usesLocalWhisperKit) {
+      return _isLocalWhisperKitTranscribing;
+    }
+
     if (_selectedSource == 'both') {
       return _speechToText.isListening || _isSystemAudioListening;
     }
@@ -2952,6 +3234,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         _isStoppingListening ||
         _isSwitchingTranscriptionLanguage;
   }
+
+  bool get _canStartTranscription => _usesLocalWhisperKit || _speechEnabled;
 
   double get _signalLevel {
     if (_selectedSource == 'both') {
@@ -3000,14 +3284,17 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _preferenceSaveDebounce?.cancel();
     _partialRenderDebounce?.cancel();
     _livePartialCommitTimer?.cancel();
+    _localTranscriptionTimer?.cancel();
     _sessionLibraryRefreshDebounce?.cancel();
     _sessionContextSaveDebounce?.cancel();
     _transcriptionController.removeListener(_scheduleTranscriptSnapshotSave);
     _translationController.removeListener(_scheduleTranslationSnapshotSave);
     _sessionContextController.removeListener(_scheduleSessionContextSave);
     _systemAudioSubscription?.cancel();
+    _systemAudioControl.invokeMethod('stopLocalCapture');
     _systemAudioControl.invokeMethod('stopMicrophoneProbe');
     _systemAudioControl.invokeMethod('stop');
+    unawaited(localWhisperKitServer.stopManagedProcess());
     _transcriptionController.dispose();
     _translationController.dispose();
     _questionController.dispose();
@@ -4365,6 +4652,54 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
                   ),
                 ),
                 const SizedBox(width: 16),
+                Tooltip(
+                  message: _t.pick(
+                    'Silnik rozpoznawania mowy używany do transkrypcji live',
+                    'Speech recognition engine used for live transcription',
+                  ),
+                  child: DropdownButton<String>(
+                    value: _selectedTranscriptionEngine,
+                    items: [
+                      DropdownMenuItem(
+                        value: defaultTranscriptionEngine,
+                        child: Text(
+                          _t.pick(
+                            'Silnik: Apple Speech',
+                            'Engine: Apple Speech',
+                          ),
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: localWhisperKitTranscriptionEngine,
+                        child: Text(
+                          _t.pick(
+                            'Silnik: WhisperKit lokalnie',
+                            'Engine: WhisperKit local',
+                          ),
+                        ),
+                      ),
+                    ],
+                    onChanged: (_isListening || _isAudioTransitioning)
+                        ? null
+                        : (value) {
+                            setState(() {
+                              _selectedTranscriptionEngine =
+                                  normalizeTranscriptionEngine(value);
+                              _statusMessage = _t.pick(
+                                'Silnik transkrypcji: ${_transcriptionEngineLabel(_selectedTranscriptionEngine)}',
+                                'Transcription engine: ${_transcriptionEngineLabel(_selectedTranscriptionEngine)}',
+                              );
+                            });
+                            _saveCurrentPreferences();
+                            if (_usesLocalWhisperKit) {
+                              unawaited(
+                                _ensureLocalWhisperKitServerRunning(),
+                              );
+                            }
+                          },
+                  ),
+                ),
+                const SizedBox(width: 16),
                 DropdownButton<String>(
                   value: _selectedSource,
                   items: [
@@ -4534,7 +4869,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: (!_speechEnabled || _isAudioTransitioning)
+        onPressed: (!_canStartTranscription || _isAudioTransitioning)
             ? null
             : _isListening
                 ? () => unawaited(_stopListening())

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
-import 'screens/transcription_screen.dart';  
+import 'screens/transcription_screen.dart';
 
 void main() {
   runApp(const XplainRApp());
