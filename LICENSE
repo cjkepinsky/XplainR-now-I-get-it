@@ -1,16 +1,53 @@
-Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+XplainR Source-Available Evaluation License 1.0
+SPDX-License-Identifier: LicenseRef-XplainR-Evaluation-1.0
 
-This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 
-International License. To view a copy of this license, visit:
-http://creativecommons.org/licenses/by-nc/4.0/
+Copyright (c) 2026 XplainR author(s).
+All rights reserved except as expressly granted below.
 
-You are free to:
-- Share: copy and redistribute the material in any medium or format
-- Adapt: remix, transform, and build upon the material
+1. Permission
 
-Under the following terms:
-- Attribution: You must give appropriate credit, provide a link to the license, 
-  and indicate if changes were made.
-- NonCommercial: You may not use the material for commercial purposes.
-- No additional restrictions — You may not apply legal terms or technological 
-  measures that legally restrict others from doing anything the license permits.
+You may access, view, download, clone, and run this software locally only for:
+
+- recruitment, portfolio, or candidate evaluation;
+- personal review and learning;
+- non-commercial testing and demonstration.
+
+Recruitment evaluation is allowed even when performed by or for a commercial
+employer, provided the software is not used as a production tool, product,
+service, client deliverable, or source of commercial revenue.
+
+You may make private local modifications only for the permitted purposes above.
+
+2. Restrictions
+
+You may not, without prior written permission from the copyright holder:
+
+- sell, resell, rent, license, sublicense, or otherwise commercialize the
+  software;
+- use the software, modified or unmodified, in a commercial product, paid
+  service, hosted service, SaaS offering, internal business tool, or client
+  deliverable;
+- redistribute, publish, or provide copies of the software, modified versions,
+  compiled binaries, or substantial portions of the source code;
+- remove or alter copyright, license, or attribution notices;
+- use the XplainR name, branding, or repository identity to imply endorsement.
+
+3. Dependencies
+
+Third-party dependencies remain governed by their own licenses. This license
+does not grant rights to any third-party software, models, APIs, or services.
+
+4. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+5. Commercial Licensing
+
+For commercial use, redistribution, integration, resale, or hosted use, contact
+the copyright holder for separate written permission.

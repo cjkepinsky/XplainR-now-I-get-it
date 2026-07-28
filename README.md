@@ -37,9 +37,22 @@ Required for the Local WhisperKit transcription engine:
 If the server is already running on port `50060`, XplainR reuses it. If XplainR
 starts the server itself, it stops that managed process when the app closes.
 
+## Tested environment
+
+The app was tested on a MacBook M1 Pro with 16 GB RAM.
+
 ## Development
 
 ```text
 flutter analyze
 flutter build macos
 ```
+
+## License
+
+This repository is source-available under the XplainR Source-Available
+Evaluation License 1.0. Recruiters may review, clone, and run the app locally
+for candidate evaluation, but commercial use, resale, redistribution, hosted
+use, and product integration require separate written permission.
+
+See [LICENSE](LICENSE) for details.
