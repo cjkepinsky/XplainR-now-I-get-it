@@ -1,4 +1,5 @@
 build/
+dist/
 .dart_tool/
 .flutter-plugins-dependencies
 .flutter-plugins

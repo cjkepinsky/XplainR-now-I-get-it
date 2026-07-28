@@ -41,6 +41,16 @@ starts the server itself, it stops that managed process when the app closes.
 
 The app was tested on a MacBook M1 Pro with 16 GB RAM.
 
+## Installation
+
+Download the latest macOS DMG from
+[GitHub Releases](https://github.com/cjkepinsky/XplainR/releases), open it, and
+drag `XplainR.app` to `Applications`.
+
+The public DMG is ad-hoc signed but not notarized with an Apple Developer ID, so
+macOS Gatekeeper may require opening the app from Finder with Control-click,
+then Open.
+
 ## Development
 
 ```text
