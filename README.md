@@ -7,6 +7,65 @@ sources at the same time. It stores sessions locally, supports transcript
 search, term corrections, project-specific auto-corrections, transcript
 translation, contextual explanations, and questions over the saved transcript.
 
+## Screenshots
+
+### Live local transcription
+
+Main workspace with Local WhisperKit selected, simultaneous microphone and
+system audio levels, a project session list, live transcript, and the
+explanations panel.
+
+![Live local transcription](docs/screenshots/01-live-transcription.png)
+
+### Term correction
+
+Clicking a transcript word opens a correction dialog where the selected term can
+be edited, optionally saved as an auto-correction rule, or sent for explanation.
+
+![Term correction dialog](docs/screenshots/02-term-correction-dialog.png)
+
+### Contextual explanations
+
+XplainR explains selected transcript terms in the context of the surrounding
+conversation instead of returning a generic dictionary definition.
+
+![Contextual explanation](docs/screenshots/03-contextual-explanation.png)
+
+### Questions over the transcript
+
+The question bar can ask about the saved transcript and previous explanations,
+with answers kept in the explanation history.
+
+![Question over transcript](docs/screenshots/04-transcript-question.png)
+
+### Transcript translation
+
+The transcript view can split into original and translated text, translating the
+saved session while new transcript fragments continue to arrive.
+
+![Transcript translation](docs/screenshots/05-transcript-translation.png)
+
+### Web research answers in Polish
+
+For current or external facts, the Web option can enrich transcript-grounded
+answers with cited sources and return the result in Polish.
+
+![Web research answer in Polish](docs/screenshots/06-web-research-polish.png)
+
+### Web research answers in English
+
+The same transcript question workflow can answer in English and cite web sources
+when external context is needed.
+
+![Web research answer in English](docs/screenshots/07-web-research-english.png)
+
+### Settings
+
+The settings dialog controls the interface language, explanation model, OpenAI
+API key storage, and related preferences.
+
+![Settings dialog](docs/screenshots/08-settings.png)
+
 ## Transcription engines
 
 XplainR supports two live transcription engines:
