@@ -511,14 +511,10 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
   func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
     guard type == .audio, CMSampleBufferDataIsReady(sampleBuffer) else { return }
     request?.appendAudioSampleBuffer(sampleBuffer)
-    emitLevel(from: sampleBuffer)
+    appendAndEmitLevel(from: sampleBuffer)
   }
 
-  private func emitLevel(from sampleBuffer: CMSampleBuffer) {
-    let now = Date()
-    guard now.timeIntervalSince(lastLevelEmit) >= 0.12 else { return }
-    lastLevelEmit = now
-
+  private func appendAndEmitLevel(from sampleBuffer: CMSampleBuffer) {
     guard
       let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
       let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
@@ -564,6 +560,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
           let sample = Double(samples[index])
           sumSquares += sample * sample
           probeSamples.append(Self.floatToInt16(sample))
+          sampleCount += 1
         }
       } else if bytesPerSample == MemoryLayout<Int16>.size {
         let samples = data.bindMemory(to: Int16.self, capacity: count)
@@ -571,14 +568,18 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, SCStreamDelegate {
           let sample = Double(samples[index]) / Double(Int16.max)
           sumSquares += sample * sample
           probeSamples.append(samples[index])
+          sampleCount += 1
         }
       }
-      sampleCount += count
     }
 
-    guard sampleCount > 0 else { return }
+    guard sampleCount > 0, !probeSamples.isEmpty else { return }
     languageProbeBuffer.append(samples: probeSamples, sampleRate: sampleRate)
     transcriptionBuffer.append(samples: probeSamples, sampleRate: sampleRate)
+
+    let now = Date()
+    guard now.timeIntervalSince(lastLevelEmit) >= 0.12 else { return }
+    lastLevelEmit = now
 
     let rms = sqrt(sumSquares / Double(sampleCount))
     let db = 20.0 * log10(max(rms, 0.000001))

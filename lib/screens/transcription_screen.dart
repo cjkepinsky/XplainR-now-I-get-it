@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -115,6 +116,24 @@ class _PartialCorrection {
   });
 }
 
+class _LocalWhisperKitTranscriptionJob {
+  final int runId;
+  final int sequence;
+  final _TranscriptSource source;
+  final Uint8List wavBytes;
+  final String languageCode;
+  final String interfaceLanguage;
+
+  const _LocalWhisperKitTranscriptionJob({
+    required this.runId,
+    required this.sequence,
+    required this.source,
+    required this.wavBytes,
+    required this.languageCode,
+    required this.interfaceLanguage,
+  });
+}
+
 class _SessionAction {
   final bool rename;
   final bool delete;
@@ -144,6 +163,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   final List<String> _projects = [LocalSessionService.defaultProject];
   final List<_PartialCorrection> _microphonePartialCorrections = [];
   final List<_PartialCorrection> _systemAudioPartialCorrections = [];
+  final Queue<_LocalWhisperKitTranscriptionJob> _localWhisperKitQueue =
+      Queue<_LocalWhisperKitTranscriptionJob>();
   final TextEditingController _transcriptionController =
       TextEditingController();
   final TextEditingController _translationController = TextEditingController();
@@ -167,6 +188,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _isSwitchingTranscriptionLanguage = false;
   bool _isLocalWhisperKitTranscribing = false;
   bool _isLocalWhisperKitChunkRunning = false;
+  bool _isLocalWhisperKitQueueProcessing = false;
   bool _forceWebResearch = false;
   bool _transcriptTranslationEnabled = false;
   bool _isTranslatingExistingTranscript = false;
@@ -198,6 +220,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   bool _suppressTranslationSnapshot = false;
   bool _suppressSessionContextSave = false;
   int _nextExplanationId = 1;
+  int _localWhisperKitRunId = 0;
+  int _nextLocalWhisperKitSequence = 1;
   int _explanationCharacterTarget = 300;
   double _sidebarWidth = 300;
   double _sidebarSessionFraction = 0.48;
@@ -229,6 +253,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
   static const _visibleTranscriptWordLimit = 1500;
   static const _existingTranslationChunkMaxChars = 2800;
   static const _localTranscriptionChunkInterval = Duration(seconds: 4);
+  static const _localWhisperKitMaxAttempts = 3;
   static const _livePartialCommitInterval = Duration(seconds: 5);
   static const _livePartialCommitMinWords = 6;
   static const _languageDetectionInterval = Duration(seconds: 10);
@@ -1011,6 +1036,8 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           ));
     }
 
+    _resetLocalWhisperKitQueue();
+
     await _systemAudioSubscription?.cancel();
     _systemAudioSubscription =
         _systemAudioEvents.receiveBroadcastStream().listen(
@@ -1049,6 +1076,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     } catch (error) {
       await _systemAudioSubscription?.cancel();
       _systemAudioSubscription = null;
+      _resetLocalWhisperKitQueue();
       setState(() {
         _isLocalWhisperKitTranscribing = false;
         _isSystemAudioListening = false;
@@ -1112,11 +1140,16 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
 
     _isLocalWhisperKitChunkRunning = true;
     try {
+      var queuedAny = false;
       for (final source in _localWhisperKitSources()) {
-        await _transcribeLocalWhisperKitSource(
+        final queued = await _queueLocalWhisperKitSource(
           source,
           minDurationSeconds: minDurationSeconds,
         );
+        queuedAny = queuedAny || queued;
+      }
+      if (queuedAny) {
+        _startLocalWhisperKitQueueProcessing();
       }
     } finally {
       _isLocalWhisperKitChunkRunning = false;
@@ -1130,7 +1163,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     ];
   }
 
-  Future<void> _transcribeLocalWhisperKitSource(
+  Future<bool> _queueLocalWhisperKitSource(
     _TranscriptSource source, {
     required double minDurationSeconds,
   }) async {
@@ -1144,37 +1177,156 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
           'minDurationSeconds': minDurationSeconds,
         },
       );
-      if (bytes == null || bytes.isEmpty) return;
+      if (bytes == null || bytes.isEmpty) return false;
 
-      final transcript = await transcribeWithLocalWhisperKit(
-        bytes,
-        languageCode: _speechLanguageCode,
-        interfaceLanguage: _selectedInterfaceLanguage,
-      );
-      final cleanTranscript = transcript.trim();
-      if (!mounted || cleanTranscript.isEmpty) return;
-
-      setState(() {
-        final appended = _appendTranscriptSegment(
-          cleanTranscript,
+      _localWhisperKitQueue.add(
+        _LocalWhisperKitTranscriptionJob(
+          runId: _localWhisperKitRunId,
+          sequence: _nextLocalWhisperKitSequence,
           source: source,
-        );
-        if (appended) {
-          _statusMessage = _t.pick(
-            'Dodano fragment z lokalnego WhisperKit.',
-            'Added a local WhisperKit transcript segment.',
-          );
-        }
-      });
+          wavBytes: bytes,
+          languageCode: _speechLanguageCode,
+          interfaceLanguage: _selectedInterfaceLanguage,
+        ),
+      );
+      _nextLocalWhisperKitSequence += 1;
+      return true;
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         _statusMessage = _t.pick(
-          'Błąd lokalnej transkrypcji WhisperKit: $error',
-          'Local WhisperKit transcription error: $error',
+          'Błąd pobierania fragmentu audio dla WhisperKit: $error',
+          'Could not collect a WhisperKit audio chunk: $error',
         );
       });
+      return false;
     }
+  }
+
+  void _startLocalWhisperKitQueueProcessing() {
+    if (_isLocalWhisperKitQueueProcessing) return;
+    unawaited(_processLocalWhisperKitQueue());
+  }
+
+  Future<void> _processLocalWhisperKitQueue() async {
+    if (_isLocalWhisperKitQueueProcessing) return;
+    _isLocalWhisperKitQueueProcessing = true;
+
+    try {
+      while (_localWhisperKitQueue.isNotEmpty) {
+        final job = _localWhisperKitQueue.first;
+        if (job.runId != _localWhisperKitRunId) {
+          _localWhisperKitQueue.removeFirst();
+          continue;
+        }
+
+        try {
+          final transcript = await _transcribeLocalWhisperKitJob(job);
+          _removeLocalWhisperKitJob(job);
+          final cleanTranscript = transcript.trim();
+          if (!mounted ||
+              cleanTranscript.isEmpty ||
+              job.runId != _localWhisperKitRunId) {
+            continue;
+          }
+
+          setState(() {
+            final appended = _appendTranscriptSegment(
+              cleanTranscript,
+              source: job.source,
+            );
+            if (appended) {
+              _statusMessage = _t.pick(
+                _localWhisperKitQueue.isEmpty
+                    ? 'Dodano fragment z lokalnego WhisperKit.'
+                    : 'Dodano fragment z lokalnego WhisperKit. Kolejka: ${_localWhisperKitQueue.length}.',
+                _localWhisperKitQueue.isEmpty
+                    ? 'Added a local WhisperKit transcript segment.'
+                    : 'Added a local WhisperKit transcript segment. Queue: ${_localWhisperKitQueue.length}.',
+              );
+            }
+          });
+        } catch (error) {
+          _removeLocalWhisperKitJob(job);
+          if (!mounted || job.runId != _localWhisperKitRunId) continue;
+          setState(() {
+            _statusMessage = _t.pick(
+              'Pominięto fragment WhisperKit po $_localWhisperKitMaxAttempts próbach: $error',
+              'Skipped a WhisperKit chunk after $_localWhisperKitMaxAttempts attempts: $error',
+            );
+          });
+        }
+      }
+    } finally {
+      _isLocalWhisperKitQueueProcessing = false;
+      if (_localWhisperKitQueue.isNotEmpty) {
+        _startLocalWhisperKitQueueProcessing();
+      }
+    }
+  }
+
+  void _removeLocalWhisperKitJob(_LocalWhisperKitTranscriptionJob job) {
+    if (_localWhisperKitQueue.isEmpty) return;
+    if (identical(_localWhisperKitQueue.first, job)) {
+      _localWhisperKitQueue.removeFirst();
+    } else {
+      _localWhisperKitQueue.remove(job);
+    }
+  }
+
+  Future<String> _transcribeLocalWhisperKitJob(
+    _LocalWhisperKitTranscriptionJob job,
+  ) async {
+    Object? lastError;
+    for (var attempt = 1;
+        attempt <= _localWhisperKitMaxAttempts;
+        attempt += 1) {
+      if (!mounted || job.runId != _localWhisperKitRunId) {
+        break;
+      }
+      try {
+        return await transcribeWithLocalWhisperKit(
+          job.wavBytes,
+          languageCode: job.languageCode,
+          interfaceLanguage: job.interfaceLanguage,
+        );
+      } catch (error) {
+        lastError = error;
+        if (attempt >= _localWhisperKitMaxAttempts ||
+            !mounted ||
+            job.runId != _localWhisperKitRunId) {
+          break;
+        }
+
+        if (mounted) {
+          setState(() {
+            _statusMessage = _t.pick(
+              'Ponawiam fragment WhisperKit ${job.sequence} ($attempt/$_localWhisperKitMaxAttempts)...',
+              'Retrying WhisperKit chunk ${job.sequence} ($attempt/$_localWhisperKitMaxAttempts)...',
+            );
+          });
+        }
+        await Future<void>.delayed(_localWhisperKitRetryDelay(attempt));
+      }
+    }
+
+    throw lastError ??
+        Exception(
+          _t.pick(
+            'Nieznany błąd lokalnej transkrypcji WhisperKit.',
+            'Unknown local WhisperKit transcription error.',
+          ),
+        );
+  }
+
+  Duration _localWhisperKitRetryDelay(int attempt) {
+    return Duration(milliseconds: 600 * attempt);
+  }
+
+  void _resetLocalWhisperKitQueue() {
+    _localWhisperKitRunId += 1;
+    _nextLocalWhisperKitSequence = 1;
+    _localWhisperKitQueue.clear();
   }
 
   Future<void> _ensureActiveSession() async {
@@ -1209,6 +1361,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _livePartialCommitTimer = null;
     _sessionContextSaveDebounce?.cancel();
     _sessionContextSaveDebounce = null;
+    _resetLocalWhisperKitQueue();
     setState(() {
       _setVisibleTranscription('', persist: false);
       _setVisibleTranslation('', persist: false);
@@ -1762,6 +1915,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     final committedText = _committedTranscription.trim();
     final previousSegment =
         _transcriptionSegments.isNotEmpty ? _transcriptionSegments.last : '';
+    final previousSource = _transcriptSourceForSegment(previousSegment);
     final previousText = _stripTranscriptSourceLabel(previousSegment);
     final segmentText = source == null
         ? trimmed
@@ -1773,7 +1927,12 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     }
     if (committedText.isNotEmpty &&
         _transcriptionSegments.isNotEmpty &&
-        _isLikelySameSegment(previousText, trimmed)) {
+        _shouldDedupeTranscriptSegment(
+          previousText,
+          trimmed,
+          previousSource: previousSource,
+          nextSource: source,
+        )) {
       return false;
     }
     if (committedText.isNotEmpty && committedText.endsWith(segmentText)) {
@@ -1792,6 +1951,18 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     return source == _TranscriptSource.microphone
         ? _t.pick('Mikrofon', 'Microphone')
         : 'System audio';
+  }
+
+  _TranscriptSource? _transcriptSourceForSegment(String text) {
+    final match = RegExp(
+      r'^\s*(Mikrofon|Microphone|Mic|System audio)\s*:\s*',
+      caseSensitive: false,
+    ).firstMatch(text);
+    final label = match?.group(1)?.toLowerCase();
+    if (label == null) return null;
+    return label == 'system audio'
+        ? _TranscriptSource.systemAudio
+        : _TranscriptSource.microphone;
   }
 
   String _stripTranscriptSourceLabel(String text) {
@@ -2119,6 +2290,35 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _sessionLibraryRefreshDebounce?.cancel();
     _sessionLibraryRefreshDebounce = null;
     await _refreshSessionLibrary();
+  }
+
+  bool _shouldDedupeTranscriptSegment(
+    String previous,
+    String next, {
+    required _TranscriptSource? previousSource,
+    required _TranscriptSource? nextSource,
+  }) {
+    final sameSource = previousSource == nextSource ||
+        previousSource == null ||
+        nextSource == null;
+    if (sameSource) {
+      return _isLikelySameSegment(previous, next);
+    }
+
+    return _isSameNormalizedSegment(previous, next);
+  }
+
+  bool _isSameNormalizedSegment(String previous, String next) {
+    final previousWords = _normalizedWords(previous);
+    final nextWords = _normalizedWords(next);
+    if (previousWords.isEmpty || previousWords.length != nextWords.length) {
+      return false;
+    }
+
+    for (var index = 0; index < previousWords.length; index += 1) {
+      if (previousWords[index] != nextWords[index]) return false;
+    }
+    return true;
   }
 
   bool _isLikelySameSegment(String previous, String next) {
@@ -3285,6 +3485,7 @@ class _TranscriptionScreenState extends State<TranscriptionScreen> {
     _partialRenderDebounce?.cancel();
     _livePartialCommitTimer?.cancel();
     _localTranscriptionTimer?.cancel();
+    _resetLocalWhisperKitQueue();
     _sessionLibraryRefreshDebounce?.cancel();
     _sessionContextSaveDebounce?.cancel();
     _transcriptionController.removeListener(_scheduleTranscriptSnapshotSave);

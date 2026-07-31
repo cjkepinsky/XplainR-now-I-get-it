@@ -1,5 +1,6 @@
 name: xplainr
 description: Desktop assistant for live transcription and technical explanations.
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.5.0 <4.0.0'
